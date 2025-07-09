@@ -1,11 +1,7 @@
 const express = require('express');
-const { createProxyMiddleware } = require('http-proxy-middleware');
 const dns = require('dns').promises;
-const https = require('https');
-const http = require('http');
 const url = require('url');
 const zlib = require('zlib');
-const { promisify } = require('util');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,12 +47,10 @@ function getCommonHeaders(target, originalHeaders = {}, hasBody = false) {
         headers['Cookie'] = originalHeaders['cookie'];
     }
     
-    // Only include content-type and content-length for requests with body
+    // Only include content-type for requests with body
     if (hasBody && originalHeaders['content-type']) {
         headers['Content-Type'] = originalHeaders['content-type'];
     }
-    
-    // Don't copy Content-Length - let fetch handle it automatically
     
     return headers;
 }
@@ -113,11 +107,14 @@ function looksLikeHTML(body) {
     return patterns.some(pattern => pattern.test(checkText));
 }
 
-// URL rewriting function
-function rewriteUrls(body, target, proxyHost) {
+// URL rewriting function for HTML content
+function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     if (!body) return body;
     
     let content = body.toString();
+    
+    console.log('=== Starting URL Rewriting ===');
+    console.log('Input target:', target, 'Input proxyHost:', proxyHost, 'Protocol:', protocol);
     
     // Remove all data-locksmith scripts
     content = content.replace(/<script[^>]*?data-locksmith[^>]*?>.*?<\/script>/gis, '');
@@ -133,46 +130,187 @@ function rewriteUrls(body, target, proxyHost) {
         }
     );
 
-    // Add data-original-domain to main.js script tags
+    // 1. MOST IMPORTANT: Rewrite protocol-relative URLs (//domain.com/path)
+    // Example: //thejellybee.com/cdn/shop/t/94/assets/vendor.min.js?v=123
+    // Should become: //localhost:3000/cdn/shop/t/94/assets/vendor.min.js?v=123&hmtarget=thejellybee.com&hmtype=1
     content = content.replace(
-        /(<script[^>]*src=["'](?:\/\/|https?:\/\/)[^\/]+)(\/[^"']+main\.js[^"']*["'][^>]*)(>)/gi,
-        (match, scriptStart, path, closing) => {
-            const domainMatch = scriptStart.match(/\/\/([^\/]+)/);
-            if (domainMatch) {
-                const domain = domainMatch[1];
-                return `<script src="//${proxyHost}${path}&hmtarget=${domain}&hmtype=1" data-original-domain="${domain}"${closing}`;
+        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
+        (match, prefix, domain, path, suffix) => {
+            if (domain === proxyHost) return match; // Skip if already our proxy
+            
+            console.log('=== Protocol-relative URL match ===');
+            console.log('Full match:', match);
+            console.log('Prefix:', prefix);
+            console.log('Domain:', domain);
+            console.log('Path:', path);
+            console.log('Suffix:', suffix);
+            console.log('ProxyHost:', proxyHost);
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenUrl = `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+            
+            console.log('Separator used:', separator);
+            console.log('Final rewritten URL:', rewrittenUrl);
+            console.log('Complete result:', prefix + rewrittenUrl + suffix);
+            console.log('=== End match ===');
+            
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
+
+    // 2. Rewrite absolute URLs (https://domain.com/path or http://domain.com/path)
+    // Example: https://thejellybee.com/cdn/shop/assets/file.css?v=123
+    // Should become: http://localhost:3000/cdn/shop/assets/file.css?v=123&hmtarget=thejellybee.com&hmtype=1 (if server is HTTP)
+    content = content.replace(
+        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])https?:\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
+        (match, prefix, domain, path, suffix) => {
+            if (domain === proxyHost) return match; // Skip if already our proxy
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenUrl = `${protocol}://${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+            
+            console.log('Rewriting absolute URL:', `https://${domain}${path}`, '→', rewrittenUrl);
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
+
+    // 3. Rewrite relative URLs that start with / (but not //)
+    // Example: /assets/file.js?v=123
+    // Should become: http://localhost:3000/assets/file.js?v=123&hmtarget=target&hmtype=1 (if server is HTTP)
+    content = content.replace(
+        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])(\/[^\/\s"'][^"']*)(["'])/gi,
+        (match, prefix, path, suffix) => {
+            if (path.includes('hmtarget=')) return match; // Skip if already proxied
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenUrl = `${protocol}://${proxyHost}${path}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting relative URL:', path, '→', rewrittenUrl);
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
+
+    // 4. Handle srcset attributes specially (can contain multiple URLs)
+    content = content.replace(/srcset\s*=\s*["']([^"']+)["']/gi, (match, srcset) => {
+        console.log('Processing srcset:', srcset);
+        const rewrittenSrcset = srcset.replace(/\/\/([^\/\s,]+)([^\s,]*)/g, (urlMatch, domain, path) => {
+            if (domain === proxyHost) return urlMatch;
+            const separator = path.includes('?') ? '&' : '?';
+            return `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+        });
+        return match.replace(srcset, rewrittenSrcset);
+    });
+
+    // 5. Rewrite CSS url() functions in style tags and inline styles
+    content = content.replace(/url\s*\(\s*["']?([^"')]+)["']?\s*\)/gi, (match, url) => {
+        if (url.startsWith('data:') || url.startsWith('#')) return match;
+        
+        if (url.startsWith('//')) {
+            // Protocol-relative URL
+            const parts = url.substring(2).split('/');
+            const domain = parts[0];
+            const path = url.substring(2 + domain.length);
+            if (domain === proxyHost) return match;
+            
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenUrl = `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+            
+            console.log('Rewriting CSS protocol-relative URL:', url, '→', rewrittenUrl);
+            return `url("${rewrittenUrl}")`;
+        } else if (url.match(/^https?:\/\//)) {
+            // Absolute URL
+            try {
+                const urlObj = new URL(url);
+                if (urlObj.host === proxyHost) return match;
+                
+                const separator = (urlObj.pathname + urlObj.search).includes('?') ? '&' : '?';
+                const rewrittenUrl = `${protocol}://${proxyHost}${urlObj.pathname}${urlObj.search}${separator}hmtarget=${urlObj.host}&hmtype=1`;
+                
+                console.log('Rewriting CSS absolute URL:', url, '→', rewrittenUrl);
+                return `url("${rewrittenUrl}")`;
+            } catch (e) {
+                return match;
             }
+        } else if (url.startsWith('/')) {
+            // Absolute path
+            const separator = url.includes('?') ? '&' : '?';
+            const rewrittenUrl = `${protocol}://${proxyHost}${url}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting CSS relative URL:', url, '→', rewrittenUrl);
+            return `url("${rewrittenUrl}")`;
+        }
+        return match;
+    });
+
+    // 6. Rewrite JavaScript fetch, XMLHttpRequest, and other dynamic URLs in string literals
+    content = content.replace(/(['"`])\/\/([^\/\s'"`]+)([^'"`]*)\1/g, (match, quote, domain, path) => {
+        // Skip if it looks like a comment
+        if (match.includes('/*') || match.includes('//')) {
             return match;
+        }
+        if (domain === proxyHost) return match;
+        
+        const separator = path.includes('?') ? '&' : '?';
+        const rewrittenUrl = `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+        
+        console.log('Rewriting JS protocol-relative URL:', '//' + domain + path, '→', rewrittenUrl);
+        return `${quote}${rewrittenUrl}${quote}`;
+    });
+
+    // 7. Update main.js script tags with proper rewriting
+    content = content.replace(
+        /(<script[^>]*src=["'])((?:\/\/|https?:\/\/)([^\/]+))(\/[^"']*main\.js[^"']*)(["'][^>]*)(>)/gi,
+        (match, prefix, fullDomain, domain, path, suffix, closing) => {
+            if (domain === proxyHost) return match;
+            
+            const separator = path.includes('?') ? '&' : '?';
+            let rewrittenUrl;
+            
+            if (fullDomain.startsWith('//')) {
+                rewrittenUrl = `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+            } else {
+                rewrittenUrl = `${protocol}://${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+            }
+            
+            console.log('Rewriting main.js script:', fullDomain + path, '→', rewrittenUrl);
+            return `${prefix}${rewrittenUrl}${suffix} data-original-domain="${domain}"${closing}`;
         }
     );
     
+    console.log('URL rewriting completed');
     return content;
 }
 
 // Function to rewrite Location headers
-function rewriteLocationHeader(location, target, proxyHost) {
+function rewriteLocationHeader(location, target, proxyHost, protocol = 'http') {
     if (!location) return null;
     
     // If it's a full URL, rewrite it
     if (location.match(/^https?:\/\//)) {
         const locationUrl = new URL(location);
-        return `https://${proxyHost}/?hmtarget=${locationUrl.host}&hmtype=1${locationUrl.pathname}${locationUrl.search}`;
+        const separator = (locationUrl.pathname + locationUrl.search).includes('?') ? '&' : '?';
+        return `${protocol}://${proxyHost}${locationUrl.pathname}${locationUrl.search}${separator}hmtarget=${locationUrl.host}&hmtype=1`;
     } else {
         // If it's a relative URL, make it absolute through our proxy
         if (location.startsWith('/')) {
-            return `https://${proxyHost}/?hmtarget=${target}&hmtype=1${location}`;
+            const separator = location.includes('?') ? '&' : '?';
+            return `${protocol}://${proxyHost}${location}${separator}hmtarget=${target}&hmtype=1`;
         }
     }
     return location;
 }
 
 // Function to rewrite cart JSON URLs
-function rewriteCartJsonUrls(body, target, proxyHost) {
+function rewriteCartJsonUrls(body, target, proxyHost, protocol = 'http') {
     if (!body) return body;
     
     let content = body.toString();
+    console.log('Rewriting cart JSON URLs with protocol:', protocol);
     
-    // Rewrite relative URLs
+    // Rewrite relative URLs in JSON
     content = content.replace(/"url"\s*:\s*"(\/[^"]*)"/gi, (match, url) => {
         const separator = url.includes('?') ? '&' : '?';
         return `"url":"${url}${separator}hmtarget=${target}&hmtype=1"`;
@@ -180,8 +318,15 @@ function rewriteCartJsonUrls(body, target, proxyHost) {
     
     // Rewrite CDN URLs
     content = content.replace(/"(https:\/\/cdn\.shopify\.com\/[^"]*)"/gi, (match, cdnUrl) => {
-        const encodedUrl = encodeURIComponent(cdnUrl);
-        return `"https://${proxyHost}/asset?hmtarget=${target}&hmtype=2&hmurl=${encodedUrl}"`;
+        try {
+            const urlObj = new URL(cdnUrl);
+            const separator = (urlObj.pathname + urlObj.search).includes('?') ? '&' : '?';
+            return `"${protocol}://${proxyHost}${urlObj.pathname}${urlObj.search}${separator}hmtarget=${urlObj.host}&hmtype=1"`;
+        } catch (e) {
+            // Fallback to asset proxy
+            const encodedUrl = encodeURIComponent(cdnUrl);
+            return `"${protocol}://${proxyHost}/asset?hmtarget=${target}&hmtype=2&hmurl=${encodedUrl}"`;
+        }
     });
     
     // Rewrite other external URLs
@@ -189,180 +334,18 @@ function rewriteCartJsonUrls(body, target, proxyHost) {
         if (externalUrl.includes(proxyHost)) {
             return match;
         }
-        const encodedUrl = encodeURIComponent(externalUrl);
-        return `"https://${proxyHost}/asset?hmtarget=${target}&hmtype=2&hmurl=${encodedUrl}"`;
+        try {
+            const urlObj = new URL(externalUrl);
+            const separator = (urlObj.pathname + urlObj.search).includes('?') ? '&' : '?';
+            return `"${protocol}://${proxyHost}${urlObj.pathname}${urlObj.search}${separator}hmtarget=${urlObj.host}&hmtype=1"`;
+        } catch (e) {
+            // Fallback to asset proxy
+            const encodedUrl = encodeURIComponent(externalUrl);
+            return `"${protocol}://${proxyHost}/asset?hmtarget=${target}&hmtype=2&hmurl=${encodedUrl}"`;
+        }
     });
     
     return content;
-}
-
-// Main request handler
-async function handleRequest(req, res, next) {
-    try {
-        console.log('Request URL:', req.url);
-        console.log('Query params:', req.query);
-        
-        // Extract target from query parameters
-        const target = req.query.hmtarget;
-        if (!target) {
-            return res.status(400).send('No target specified');
-        }
-
-        // Clean up target
-        const cleanTarget = target.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-        console.log('Target:', cleanTarget);
-
-        // Get the original path and query
-        const urlParts = url.parse(req.url, true);
-        let targetPath = urlParts.pathname === '/' ? '' : urlParts.pathname;
-        
-        // Remove proxy-specific parameters
-        const cleanQuery = { ...urlParts.query };
-        delete cleanQuery.hmtarget;
-        delete cleanQuery.hmtype;
-        delete cleanQuery.hmurl;
-        
-        const queryString = new URLSearchParams(cleanQuery).toString();
-        const targetUrl = `https://${cleanTarget}${targetPath}${queryString ? '?' + queryString : ''}`;
-        
-        console.log('Target URL:', targetUrl);
-
-        // Prepare headers
-        const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body;
-        const headers = getCommonHeaders(cleanTarget, req.headers, hasBody);
-        
-        // Handle cart section requests - remove caching headers
-        if (req.url.includes('sections=cart')) {
-            delete headers['If-Modified-Since'];
-            delete headers['If-None-Match'];
-            headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
-            headers['Pragma'] = 'no-cache';
-        }
-
-        // Make request to target
-        const proxyRes = await makeProxyRequest(targetUrl, {
-            method: req.method,
-            headers: headers,
-            body: hasBody ? req.body : undefined
-        });
-
-        // Set response status and headers
-        res.status(proxyRes.status);
-        
-        // Copy response headers, filtering out problematic ones
-        Object.keys(proxyRes.headers).forEach(key => {
-            const lowerKey = key.toLowerCase();
-            if (!['connection', 'transfer-encoding', 'content-encoding', 'content-length'].includes(lowerKey)) {
-                if (lowerKey === 'content-security-policy') {
-                    res.set(key, 'frame-ancestors *');
-                } else if (lowerKey !== 'x-frame-options') {
-                    res.set(key, proxyRes.headers[key]);
-                }
-            }
-        });
-
-        // Always set our CSP
-        res.set('Content-Security-Policy', 'frame-ancestors *');
-
-        // Process response body
-        const contentType = proxyRes.headers['content-type'] || '';
-        const isHtml = contentType.includes('text/html') || looksLikeHTML(proxyRes.body);
-        
-        console.log('Content-Type:', contentType, 'Is HTML:', isHtml);
-
-        if (isHtml) {
-            console.log('Processing HTML content');
-            const rewrittenBody = rewriteUrls(proxyRes.body, cleanTarget, req.get('host'));
-            res.send(rewrittenBody);
-        } else if (contentType.includes('application/json') && (req.path.includes('/cart/') || req.path.includes('cart.js'))) {
-            console.log('Processing JSON cart response');
-            const rewrittenBody = rewriteCartJsonUrls(proxyRes.body, cleanTarget, req.get('host'));
-            res.send(rewrittenBody);
-        } else if (contentType.includes('javascript') && req.path.includes('main.js')) {
-            console.log('Processing main.js');
-            let body = proxyRes.body.toString();
-            
-            // Modify domain array in main.js
-            body = body.replace(/(e\.exports\s*=\s*\[)([^\]]+)(\])/, (match, start, domains, end) => {
-                // Parse existing domains
-                const domainList = domains.replace(/["'\s]/g, '').split(',').filter(d => d);
-                
-                // Add our domains if not present
-                const ourDomains = [req.get('host'), 'heatmap.com', 'heatmapcore.com', 'portal.heatmap.com'];
-                ourDomains.forEach(domain => {
-                    if (!domainList.includes(domain)) {
-                        domainList.push(domain);
-                    }
-                });
-                
-                return start + '"' + domainList.join('", "') + '"' + end;
-            });
-            
-            res.send(body);
-        } else {
-            console.log('Passing through content as-is');
-            res.send(proxyRes.body);
-        }
-        
-    } catch (error) {
-        console.error('Request failed:', error);
-        res.status(500).send(`Request failed: ${error.message}`);
-    }
-}
-
-// Asset handler
-async function handleAsset(req, res) {
-    try {
-        const target = req.query.hmtarget;
-        const assetUrl = req.query.hmurl;
-        
-        if (!target) {
-            return res.status(400).send('No target specified for asset');
-        }
-
-        let targetUrl;
-        if (assetUrl) {
-            targetUrl = decodeURIComponent(assetUrl);
-        } else {
-            const cleanTarget = target.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
-            const urlParts = url.parse(req.url, true);
-            const targetPath = urlParts.pathname.replace('/asset', '') || '/';
-            
-            const cleanQuery = { ...urlParts.query };
-            delete cleanQuery.hmtarget;
-            delete cleanQuery.hmtype;
-            delete cleanQuery.hmurl;
-            
-            const queryString = new URLSearchParams(cleanQuery).toString();
-            targetUrl = `https://${cleanTarget}${targetPath}${queryString ? '?' + queryString : ''}`;
-        }
-
-        console.log('Asset URL:', targetUrl);
-
-        const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body;
-        const headers = getCommonHeaders(target.replace(/^https?:\/\//, ''), req.headers, hasBody);
-        
-        const proxyRes = await makeProxyRequest(targetUrl, {
-            method: req.method,
-            headers: headers,
-            body: hasBody ? req.body : undefined
-        });
-
-        res.status(proxyRes.status);
-        
-        Object.keys(proxyRes.headers).forEach(key => {
-            const lowerKey = key.toLowerCase();
-            if (!['connection', 'transfer-encoding', 'content-encoding', 'content-length'].includes(lowerKey)) {
-                res.set(key, proxyRes.headers[key]);
-            }
-        });
-
-        res.send(proxyRes.body);
-        
-    } catch (error) {
-        console.error('Asset request failed:', error);
-        res.status(500).send(`Asset request failed: ${error.message}`);
-    }
 }
 
 // Make proxy request with retry logic
@@ -469,9 +452,203 @@ async function makeProxyRequest(targetUrl, options) {
     throw new Error('Maximum retries exceeded');
 }
 
-// Screenshot proxy handler
-app.get('/screenshot-proxy', async (req, res) => {
+// Main request handler
+async function handleRequest(req, res, next) {
     try {
+        console.log('=== New Request ===');
+        console.log('Request URL:', req.url);
+        console.log('Request path:', req.path);
+        console.log('Query params:', req.query);
+        
+        // Extract target from query parameters
+        const target = req.query.hmtarget;
+        if (!target) {
+            return res.status(400).send('No target specified');
+        }
+
+        // Clean up target
+        const cleanTarget = target.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+        console.log('Clean target:', cleanTarget);
+
+        // For the new URL structure, we need to use the actual request path
+        // Example: //localhost:3000/cdn/shop/assets/file.js?v=123&hmtarget=domain.com&hmtype=1
+        // Should become: https://domain.com/cdn/shop/assets/file.js?v=123
+        
+        const requestPath = req.path; // This will be /cdn/shop/assets/file.js
+        
+        // Remove proxy-specific parameters from query
+        const cleanQuery = { ...req.query };
+        delete cleanQuery.hmtarget;
+        delete cleanQuery.hmtype;
+        delete cleanQuery.hmurl;
+        
+        // Build the target URL using the actual request path
+        const queryString = new URLSearchParams(cleanQuery).toString();
+        const targetUrl = `https://${cleanTarget}${requestPath}${queryString ? '?' + queryString : ''}`;
+        
+        console.log('Request path:', requestPath);
+        console.log('Clean query params:', cleanQuery);
+        console.log('Final target URL:', targetUrl);
+
+        // Prepare headers
+        const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body;
+        const headers = getCommonHeaders(cleanTarget, req.headers, hasBody);
+        
+        // Handle cart section requests - remove caching headers
+        if (req.url.includes('sections=cart')) {
+            delete headers['If-Modified-Since'];
+            delete headers['If-None-Match'];
+            headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+            headers['Pragma'] = 'no-cache';
+            console.log('Disabled caching for cart section request');
+        }
+
+        // Make request to target
+        console.log('Making proxy request...');
+        const proxyRes = await makeProxyRequest(targetUrl, {
+            method: req.method,
+            headers: headers,
+            body: hasBody ? req.body : undefined
+        });
+
+        console.log('Proxy response received, status:', proxyRes.status);
+
+        // Set response status and headers
+        res.status(proxyRes.status);
+        
+        // Copy response headers, filtering out problematic ones
+        Object.keys(proxyRes.headers).forEach(key => {
+            const lowerKey = key.toLowerCase();
+            if (!['connection', 'transfer-encoding', 'content-encoding', 'content-length'].includes(lowerKey)) {
+                if (lowerKey === 'content-security-policy') {
+                    res.set(key, 'frame-ancestors *');
+                } else if (lowerKey !== 'x-frame-options') {
+                    res.set(key, proxyRes.headers[key]);
+                }
+            }
+        });
+
+        // Always set our CSP
+        res.set('Content-Security-Policy', 'frame-ancestors *');
+
+        // Process response body
+        const contentType = proxyRes.headers['content-type'] || '';
+        const isHtml = contentType.includes('text/html') || looksLikeHTML(proxyRes.body);
+        
+        console.log('Content-Type:', contentType);
+        console.log('Is HTML:', isHtml);
+        console.log('Request path:', req.path);
+
+        if (isHtml) {
+            console.log('Processing HTML content with URL rewriting');
+            // Determine protocol based on the incoming request
+            const protocol = req.protocol || (req.get('x-forwarded-proto')) || 'http';
+            console.log('Using protocol:', protocol);
+            
+            const rewrittenBody = rewriteUrls(proxyRes.body, cleanTarget, req.get('host'), protocol);
+            res.send(rewrittenBody);
+        } else if (contentType.includes('application/json') && (req.path.includes('/cart/') || req.path.includes('cart.js'))) {
+            console.log('Processing JSON cart response');
+            const protocol = req.protocol || (req.get('x-forwarded-proto')) || 'http';
+            const rewrittenBody = rewriteCartJsonUrls(proxyRes.body, cleanTarget, req.get('host'), protocol);
+            res.send(rewrittenBody);
+        } else if (contentType.includes('javascript') && req.path.includes('main.js')) {
+            console.log('Processing main.js file');
+            let body = proxyRes.body.toString();
+            
+            // Modify domain array in main.js
+            body = body.replace(/(e\.exports\s*=\s*\[)([^\]]+)(\])/, (match, start, domains, end) => {
+                // Parse existing domains
+                const domainList = domains.replace(/["'\s]/g, '').split(',').filter(d => d);
+                
+                // Add our domains if not present
+                const ourDomains = [req.get('host'), 'heatmap.com', 'heatmapcore.com', 'portal.heatmap.com'];
+                ourDomains.forEach(domain => {
+                    if (!domainList.includes(domain)) {
+                        domainList.push(domain);
+                    }
+                });
+                
+                return start + '"' + domainList.join('", "') + '"' + end;
+            });
+            
+            res.send(body);
+        } else {
+            console.log('Passing through content as-is');
+            res.send(proxyRes.body);
+        }
+        
+    } catch (error) {
+        console.error('Request failed:', error);
+        res.status(500).send(`Request failed: ${error.message}`);
+    }
+}
+
+// Asset handler
+async function handleAsset(req, res) {
+    try {
+        console.log('=== Asset Request ===');
+        console.log('Asset URL:', req.url);
+        
+        const target = req.query.hmtarget;
+        const assetUrl = req.query.hmurl;
+        
+        if (!target) {
+            return res.status(400).send('No target specified for asset');
+        }
+
+        let targetUrl;
+        if (assetUrl) {
+            targetUrl = decodeURIComponent(assetUrl);
+            console.log('Using decoded asset URL:', targetUrl);
+        } else {
+            const cleanTarget = target.replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+            const urlParts = url.parse(req.url, true);
+            const targetPath = urlParts.pathname.replace('/asset', '') || '/';
+            
+            const cleanQuery = { ...urlParts.query };
+            delete cleanQuery.hmtarget;
+            delete cleanQuery.hmtype;
+            delete cleanQuery.hmurl;
+            
+            const queryString = new URLSearchParams(cleanQuery).toString();
+            targetUrl = `https://${cleanTarget}${targetPath}${queryString ? '?' + queryString : ''}`;
+            console.log('Constructed asset URL:', targetUrl);
+        }
+
+        const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body;
+        const headers = getCommonHeaders(target.replace(/^https?:\/\//, ''), req.headers, hasBody);
+        
+        console.log('Making asset request...');
+        const proxyRes = await makeProxyRequest(targetUrl, {
+            method: req.method,
+            headers: headers,
+            body: hasBody ? req.body : undefined
+        });
+
+        console.log('Asset response received, status:', proxyRes.status);
+
+        res.status(proxyRes.status);
+        
+        Object.keys(proxyRes.headers).forEach(key => {
+            const lowerKey = key.toLowerCase();
+            if (!['connection', 'transfer-encoding', 'content-encoding', 'content-length'].includes(lowerKey)) {
+                res.set(key, proxyRes.headers[key]);
+            }
+        });
+
+        res.send(proxyRes.body);
+        
+    } catch (error) {
+        console.error('Asset request failed:', error);
+        res.status(500).send(`Asset request failed: ${error.message}`);
+    }
+}
+
+// Screenshot proxy handler
+async function handleScreenshotProxy(req, res) {
+    try {
+        console.log('=== Screenshot Proxy Request ===');
         const { initialMutationUrl, idSite, idSiteHsr, deviceType, baseUrl = '' } = req.query;
         
         if (!initialMutationUrl) {
@@ -479,6 +656,8 @@ app.get('/screenshot-proxy', async (req, res) => {
                 error: "invalid url, please check if the url contains initialMutation"
             });
         }
+
+        console.log('Fetching initial mutation from:', initialMutationUrl);
 
         // Fetch initial mutation
         const response = await fetch(initialMutationUrl, {
@@ -571,29 +750,89 @@ app.get('/screenshot-proxy', async (req, res) => {
         console.error('Screenshot proxy failed:', error);
         res.status(500).json({ error: 'Internal server error' });
     }
-});
+}
 
 // Routes
 app.get('/favicon.ico', (req, res) => {
     res.status(204).end(); // No content for favicon
 });
+
 app.get('/asset', handleAsset);
 app.post('/asset', handleAsset);
-app.get('/screenshot-proxy', (req, res) => handleScreenshotProxy(req, res));
+app.put('/asset', handleAsset);
+app.patch('/asset', handleAsset);
+app.delete('/asset', handleAsset);
 
-// Main proxy route - catch all
+app.get('/screenshot-proxy', handleScreenshotProxy);
+
+// Main proxy route - catch all other requests
 app.use('/', handleRequest);
 
 // Error handling middleware
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
-    res.status(500).send('Internal server error');
+    if (!res.headersSent) {
+        res.status(500).send('Internal server error');
+    }
 });
 
 // Start server
 app.listen(PORT, () => {
+    console.log(`=================================`);
     console.log(`Proxy server running on port ${PORT}`);
-    console.log(`Access via: http://localhost:${PORT}/?hmtarget=example.com&hmtype=1`);
+    console.log(`=================================`);
+    console.log(`Usage examples:`);
+    console.log(`Main proxy: http://localhost:${PORT}/?hmtarget=example.com&hmtype=1`);
+    console.log(`Asset proxy: http://localhost:${PORT}/asset?hmtarget=example.com&hmtype=2&hmurl=https%3A//example.com/style.css`);
+    console.log(`Screenshot: http://localhost:${PORT}/screenshot-proxy?initialMutationUrl=...`);
+    console.log(`=================================`);
+    
+    // Test URL rewriting logic
+    console.log('\n=== Testing URL Rewriting Logic ===');
+    const testHtml = 'src="//thejellybee.com/cdn/shop/t/94/assets/vendor.min.js?v=77136857757479301481665067824"';
+    console.log('Input HTML:', testHtml);
+    
+    const rewritten = rewriteUrls(testHtml, 'thejellybee.com', 'localhost:3000', 'http');
+    console.log('Output HTML:', rewritten);
+    
+    const expectedOutput = 'src="//localhost:3000/cdn/shop/t/94/assets/vendor.min.js?v=77136857757479301481665067824&hmtarget=thejellybee.com&hmtype=1"';
+    console.log('Expected HTML:', expectedOutput);
+    
+    const isCorrect = rewritten === expectedOutput;
+    console.log('✅ Test Result:', isCorrect ? 'PASS' : 'FAIL');
+    
+    if (!isCorrect) {
+        console.log('❌ Mismatch detected!');
+        console.log('Expected length:', expectedOutput.length);
+        console.log('Actual length:', rewritten.length);
+    }
+    
+    // Test absolute URL rewriting
+    console.log('\n=== Testing Absolute URL Rewriting ===');
+    const testAbsoluteHtml = 'href="https://cdn.jsdelivr.net/npm/bootstrap@4.5.3/dist/css/bootstrap-grid.min.css"';
+    console.log('Input HTML:', testAbsoluteHtml);
+    
+    const rewrittenAbsolute = rewriteUrls(testAbsoluteHtml, 'thejellybee.com', 'localhost:3000', 'http');
+    console.log('Output HTML:', rewrittenAbsolute);
+    
+    const expectedAbsolute = 'href="http://localhost:3000/npm/bootstrap@4.5.3/dist/css/bootstrap-grid.min.css?hmtarget=cdn.jsdelivr.net&hmtype=1"';
+    console.log('Expected HTML:', expectedAbsolute);
+    
+    const isAbsoluteCorrect = rewrittenAbsolute === expectedAbsolute;
+    console.log('✅ Absolute URL Test Result:', isAbsoluteCorrect ? 'PASS' : 'FAIL');
+    
+    console.log('=== End Tests ===\n');
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    process.exit(0);
+});
+
+process.on('SIGINT', () => {
+    console.log('SIGINT received, shutting down gracefully');
+    process.exit(0);
 });
 
 module.exports = app;
