@@ -134,7 +134,7 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     // Example: //thejellybee.com/cdn/shop/t/94/assets/vendor.min.js?v=123
     // Should become: //localhost:3000/cdn/shop/t/94/assets/vendor.min.js?v=123&hmtarget=thejellybee.com&hmtype=1
     content = content.replace(
-        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
+        /((?:src|href|action|data-src|data-href|d-src|poster|background|cite|formaction)\s*=\s*["'])\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
         (match, prefix, domain, path, suffix) => {
             if (domain === proxyHost) return match; // Skip if already our proxy
             
@@ -163,7 +163,7 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     // Example: https://thejellybee.com/cdn/shop/assets/file.css?v=123
     // Should become: http://localhost:3000/cdn/shop/assets/file.css?v=123&hmtarget=thejellybee.com&hmtype=1 (if server is HTTP)
     content = content.replace(
-        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])https?:\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
+        /((?:src|href|action|data-src|data-href|d-src|poster|background|cite|formaction)\s*=\s*["'])https?:\/\/([^\/\s"']+)(\/[^"']*)(["'])/gi,
         (match, prefix, domain, path, suffix) => {
             if (domain === proxyHost) return match; // Skip if already our proxy
             
@@ -180,7 +180,7 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     // Example: /assets/file.js?v=123
     // Should become: http://localhost:3000/assets/file.js?v=123&hmtarget=target&hmtype=1 (if server is HTTP)
     content = content.replace(
-        /((?:src|href|action|data-src|data-href|poster|background|cite|formaction)\s*=\s*["'])(\/[^\/\s"'][^"']*)(["'])/gi,
+        /((?:src|href|action|data-src|data-href|d-src|poster|background|cite|formaction)\s*=\s*["'])(\/[^\/\s"'][^"']*)(["'])/gi,
         (match, prefix, path, suffix) => {
             if (path.includes('hmtarget=')) return match; // Skip if already proxied
             
@@ -193,15 +193,26 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
         }
     );
 
-    // 4. Handle srcset attributes specially (can contain multiple URLs)
-    content = content.replace(/srcset\s*=\s*["']([^"']+)["']/gi, (match, srcset) => {
-        console.log('Processing srcset:', srcset);
-        const rewrittenSrcset = srcset.replace(/\/\/([^\/\s,]+)([^\s,]*)/g, (urlMatch, domain, path) => {
+    // 4. Handle srcset and similar multi-URL attributes specially (can contain multiple URLs)
+    content = content.replace(/((?:srcset|data-srcset|dt)\s*=\s*["'])([^"']+)(["'])/gi, (match, prefix, urls, suffix) => {
+        console.log('Processing multi-URL attribute:', prefix.trim(), 'with URLs:', urls);
+        
+        // Process each URL in the attribute (separated by commas)
+        const rewrittenUrls = urls.replace(/https?:\/\/([^\/\s,]+)([^\s,]*)/g, (urlMatch, domain, path) => {
+            // Handle absolute URLs (https://domain.com/path)
             if (domain === proxyHost) return urlMatch;
+            const separator = path.includes('?') ? '&' : '?';
+            return `${protocol}://${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
+        }).replace(/\/\/([^\/\s,]+)([^\s,]*)/g, (urlMatch, domain, path) => {
+            // Handle protocol-relative URLs (//domain.com/path) - but only if not already processed
+            if (domain === proxyHost || urlMatch.includes('hmtarget=')) return urlMatch;
             const separator = path.includes('?') ? '&' : '?';
             return `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
         });
-        return match.replace(srcset, rewrittenSrcset);
+        
+        console.log('Multi-URL attribute rewritten from:', urls);
+        console.log('Multi-URL attribute rewritten to:', rewrittenUrls);
+        return `${prefix}${rewrittenUrls}${suffix}`;
     });
 
     // 5. Rewrite CSS url() functions in style tags and inline styles
@@ -820,6 +831,48 @@ app.listen(PORT, () => {
     
     const isAbsoluteCorrect = rewrittenAbsolute === expectedAbsolute;
     console.log('✅ Absolute URL Test Result:', isAbsoluteCorrect ? 'PASS' : 'FAIL');
+    
+    // Test srcset rewriting
+    console.log('\n=== Testing Srcset Rewriting ===');
+    const testSrcsetHtml = 'srcset="https://i.shgcdn.com/image1.jpg 180w,https://i.shgcdn.com/image2.jpg 360w"';
+    console.log('Input HTML:', testSrcsetHtml);
+    
+    const rewrittenSrcset = rewriteUrls(testSrcsetHtml, 'factorydirectjewelry.com', 'localhost:3000', 'http');
+    console.log('Output HTML:', rewrittenSrcset);
+    
+    const expectedSrcset = 'srcset="http://localhost:3000/image1.jpg?hmtarget=i.shgcdn.com&hmtype=1 180w,http://localhost:3000/image2.jpg?hmtarget=i.shgcdn.com&hmtype=1 360w"';
+    console.log('Expected HTML:', expectedSrcset);
+    
+    const isSrcsetCorrect = rewrittenSrcset === expectedSrcset;
+    console.log('✅ Srcset Test Result:', isSrcsetCorrect ? 'PASS' : 'FAIL');
+    
+    // Test dt attribute rewriting (custom multi-URL attribute)
+    console.log('\n=== Testing DT Attribute Rewriting ===');
+    const testDtHtml = 'dt="https://i.shgcdn.com/image1.jpg 180w,https://i.shgcdn.com/image2.jpg 360w"';
+    console.log('Input HTML:', testDtHtml);
+    
+    const rewrittenDt = rewriteUrls(testDtHtml, 'factorydirectjewelry.com', 'localhost:3000', 'http');
+    console.log('Output HTML:', rewrittenDt);
+    
+    const expectedDt = 'dt="http://localhost:3000/image1.jpg?hmtarget=i.shgcdn.com&hmtype=1 180w,http://localhost:3000/image2.jpg?hmtarget=i.shgcdn.com&hmtype=1 360w"';
+    console.log('Expected HTML:', expectedDt);
+    
+    const isDtCorrect = rewrittenDt === expectedDt;
+    console.log('✅ DT Attribute Test Result:', isDtCorrect ? 'PASS' : 'FAIL');
+    
+    // Test d-src attribute rewriting (single URL data attribute)
+    console.log('\n=== Testing D-SRC Attribute Rewriting ===');
+    const testDSrcHtml = 'd-src="https://i.shgcdn.com/single-image.jpg"';
+    console.log('Input HTML:', testDSrcHtml);
+    
+    const rewrittenDSrc = rewriteUrls(testDSrcHtml, 'factorydirectjewelry.com', 'localhost:3000', 'http');
+    console.log('Output HTML:', rewrittenDSrc);
+    
+    const expectedDSrc = 'd-src="http://localhost:3000/single-image.jpg?hmtarget=i.shgcdn.com&hmtype=1"';
+    console.log('Expected HTML:', expectedDSrc);
+    
+    const isDSrcCorrect = rewrittenDSrc === expectedDSrc;
+    console.log('✅ D-SRC Attribute Test Result:', isDSrcCorrect ? 'PASS' : 'FAIL');
     
     console.log('=== End Tests ===\n');
 });
