@@ -18,8 +18,9 @@ const dnsCache = new Map();
 const failedDomains = new Map();
 
 // Middleware for parsing request bodies
-app.use(express.raw({ type: '*/*', limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '50mb' })); // For JSON payloads
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // For form data
+app.use(express.raw({ type: '*/*', limit: '50mb' })); // For other content types
 
 // Helper function to get common headers
 function getCommonHeaders(target, originalHeaders = {}, hasBody = false) {
@@ -115,6 +116,179 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     
     console.log('=== Starting URL Rewriting ===');
     console.log('Input target:', target, 'Input proxyHost:', proxyHost, 'Protocol:', protocol);
+    
+    // INJECT JAVASCRIPT PROXY INTERCEPTOR AT THE BEGINNING
+    const proxyInterceptorScript = `
+<script>
+(function() {
+    'use strict';
+    
+    // Extract proxy parameters from current URL
+    const urlParams = new URLSearchParams(window.location.search);
+    const hmtarget = urlParams.get('hmtarget') || '${target}';
+    const hmtype = urlParams.get('hmtype') || '1';
+    const proxyHost = window.location.host;
+    const proxyProtocol = window.location.protocol;
+    
+    console.log('🔧 Proxy interceptor loaded for target:', hmtarget);
+    
+    // Function to rewrite URLs to go through proxy
+    function rewriteUrl(url, baseUrl) {
+        if (!url || typeof url !== 'string') return url;
+        
+        // Skip data URLs, blob URLs, and fragment-only URLs
+        if (url.startsWith('data:') || url.startsWith('blob:') || url.startsWith('#')) {
+            return url;
+        }
+        
+        // Skip if already proxied
+        if (url.includes('hmtarget=')) {
+            return url;
+        }
+        
+        let targetUrl;
+        
+        if (url.startsWith('//')) {
+            // Protocol-relative URL: //domain.com/path
+            const domain = url.split('/')[2];
+            const path = url.substring(2 + domain.length);
+            const separator = path.includes('?') ? '&' : '?';
+            targetUrl = \`//\${proxyHost}\${path}\${separator}hmtarget=\${domain}&hmtype=1\`;
+        } else if (url.match(/^https?:\\/\\//)) {
+            // Absolute URL: https://domain.com/path
+            try {
+                const urlObj = new URL(url);
+                if (urlObj.host === proxyHost) return url; // Already our proxy
+                const separator = (urlObj.pathname + urlObj.search).includes('?') ? '&' : '?';
+                targetUrl = \`\${proxyProtocol}//\${proxyHost}\${urlObj.pathname}\${urlObj.search}\${separator}hmtarget=\${urlObj.host}&hmtype=1\`;
+            } catch (e) {
+                return url;
+            }
+        } else if (url.startsWith('/')) {
+            // Relative URL: /path
+            const separator = url.includes('?') ? '&' : '?';
+            targetUrl = \`\${proxyProtocol}//\${proxyHost}\${url}\${separator}hmtarget=\${hmtarget}&hmtype=1\`;
+        } else {
+            // Other relative URLs: path
+            const currentPath = window.location.pathname;
+            const basePath = currentPath.substring(0, currentPath.lastIndexOf('/') + 1);
+            const fullPath = basePath + url;
+            const separator = fullPath.includes('?') ? '&' : '?';
+            targetUrl = \`\${proxyProtocol}//\${proxyHost}\${fullPath}\${separator}hmtarget=\${hmtarget}&hmtype=1\`;
+        }
+        
+        console.log('🔄 URL rewritten:', url, '→', targetUrl);
+        return targetUrl;
+    }
+    
+    // Override fetch()
+    const originalFetch = window.fetch;
+    window.fetch = function(input, init) {
+        let url = input;
+        if (input instanceof Request) {
+            url = input.url;
+        }
+        
+        const rewrittenUrl = rewriteUrl(url);
+        console.log('🌐 Fetch intercepted:', url, '→', rewrittenUrl);
+        
+        if (input instanceof Request) {
+            // Create new Request object with rewritten URL
+            const newRequest = new Request(rewrittenUrl, {
+                method: input.method,
+                headers: input.headers,
+                body: input.body,
+                mode: input.mode,
+                credentials: input.credentials,
+                cache: input.cache,
+                redirect: input.redirect,
+                referrer: input.referrer,
+                integrity: input.integrity
+            });
+            return originalFetch.call(this, newRequest, init);
+        } else {
+            return originalFetch.call(this, rewrittenUrl, init);
+        }
+    };
+    
+    // Override XMLHttpRequest
+    const OriginalXHR = window.XMLHttpRequest;
+    window.XMLHttpRequest = function() {
+        const xhr = new OriginalXHR();
+        const originalOpen = xhr.open;
+        
+        xhr.open = function(method, url, async, user, password) {
+            const rewrittenUrl = rewriteUrl(url);
+            console.log('📡 XHR intercepted:', url, '→', rewrittenUrl);
+            return originalOpen.call(this, method, rewrittenUrl, async, user, password);
+        };
+        
+        return xhr;
+    };
+    
+    // Copy static properties
+    Object.setPrototypeOf(window.XMLHttpRequest, OriginalXHR);
+    Object.setPrototypeOf(window.XMLHttpRequest.prototype, OriginalXHR.prototype);
+    
+    // Override form submissions
+    document.addEventListener('submit', function(event) {
+        const form = event.target;
+        if (form.action) {
+            const rewrittenAction = rewriteUrl(form.action);
+            if (rewrittenAction !== form.action) {
+                console.log('📝 Form action rewritten:', form.action, '→', rewrittenAction);
+                form.action = rewrittenAction;
+            }
+        }
+    }, true);
+    
+    // Override window.location changes
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
+    
+    history.pushState = function(state, title, url) {
+        if (url) {
+            const rewrittenUrl = rewriteUrl(url);
+            console.log('🔗 PushState intercepted:', url, '→', rewrittenUrl);
+            return originalPushState.call(this, state, title, rewrittenUrl);
+        }
+        return originalPushState.call(this, state, title, url);
+    };
+    
+    history.replaceState = function(state, title, url) {
+        if (url) {
+            const rewrittenUrl = rewriteUrl(url);
+            console.log('🔗 ReplaceState intercepted:', url, '→', rewrittenUrl);
+            return originalReplaceState.call(this, state, title, rewrittenUrl);
+        }
+        return originalReplaceState.call(this, state, title, url);
+    };
+    
+    // Override anchor link clicks
+    document.addEventListener('click', function(event) {
+        const anchor = event.target.closest('a');
+        if (anchor && anchor.href && !anchor.target) {
+            const rewrittenHref = rewriteUrl(anchor.href);
+            if (rewrittenHref !== anchor.href) {
+                console.log('🔗 Anchor click intercepted:', anchor.href, '→', rewrittenHref);
+                anchor.href = rewrittenHref;
+            }
+        }
+    }, true);
+    
+    console.log('✅ Proxy interceptor fully loaded and active');
+})();
+</script>`;
+
+    // Inject the script right after <head> or at the beginning of <body>
+    if (content.includes('<head>')) {
+        content = content.replace('<head>', '<head>' + proxyInterceptorScript);
+    } else if (content.includes('<html>')) {
+        content = content.replace('<html>', '<html>' + proxyInterceptorScript);
+    } else {
+        // Fallback: prepend to the beginning
+        content = proxyInterceptorScript + content;
+    }
     
     // Remove all data-locksmith scripts
     content = content.replace(/<script[^>]*?data-locksmith[^>]*?>.*?<\/script>/gis, '');
@@ -390,13 +564,29 @@ async function makeProxyRequest(targetUrl, options) {
                 signal: AbortSignal.timeout(15000) // 15 second timeout
             };
 
-            // Only add body for methods that support it
-            if (options.body && ['POST', 'PUT', 'PATCH'].includes(options.method.toUpperCase())) {
+            // Add body for methods that support it
+            if (options.body && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(options.method.toUpperCase())) {
                 requestOptions.body = options.body;
+                
+                // Set Content-Length if body is provided and not already set
+                if (!cleanHeaders['Content-Length']) {
+                    if (typeof options.body === 'string') {
+                        cleanHeaders['Content-Length'] = Buffer.byteLength(options.body, 'utf8').toString();
+                    } else if (Buffer.isBuffer(options.body)) {
+                        cleanHeaders['Content-Length'] = options.body.length.toString();
+                    }
+                }
+                
+                console.log('POST request body type:', typeof options.body);
+                console.log('POST request body length:', cleanHeaders['Content-Length']);
+                if (typeof options.body === 'string') {
+                    console.log('POST request body preview:', options.body.substring(0, 200));
+                }
             }
 
             console.log('Making request to:', currentUrl);
             console.log('Request method:', requestOptions.method);
+            console.log('Request headers:', cleanHeaders);
 
             const response = await fetch(currentUrl, requestOptions);
 
@@ -435,6 +625,19 @@ async function makeProxyRequest(targetUrl, options) {
             console.log('Response status:', response.status);
             console.log('Response Content-Type:', contentType);
             console.log('Response body length:', body.length);
+            
+            // Log response for POST requests
+            if (options.method === 'POST') {
+                console.log('=== POST RESPONSE ===');
+                console.log('Status:', response.status);
+                console.log('Headers:', Object.fromEntries(response.headers.entries()));
+                if (body.length > 0 && body.length < 1000) {
+                    console.log('Response body:', body.toString());
+                } else if (body.length > 0) {
+                    console.log('Response body preview:', body.toString().substring(0, 500));
+                }
+                console.log('=== END POST RESPONSE ===');
+            }
 
             // Clean response headers - remove compression-related headers since we're not using compression
             const responseHeaders = Object.fromEntries(response.headers.entries());
@@ -450,6 +653,14 @@ async function makeProxyRequest(targetUrl, options) {
         } catch (error) {
             retries++;
             console.error(`Request attempt ${retries} failed:`, error.message);
+            
+            // Special handling for POST request errors
+            if (options.method === 'POST') {
+                console.error('POST request failed with error:', error);
+                console.error('Target URL:', currentUrl);
+                console.error('Body type:', typeof options.body);
+                console.error('Headers:', options.headers);
+            }
             
             if (retries >= MAX_RETRIES) {
                 throw error;
@@ -468,8 +679,33 @@ async function handleRequest(req, res, next) {
     try {
         console.log('=== New Request ===');
         console.log('Request URL:', req.url);
+        console.log('Request method:', req.method);
         console.log('Request path:', req.path);
         console.log('Query params:', req.query);
+        console.log('Content-Type:', req.get('content-type'));
+        
+        // Special logging for POST requests
+        if (req.method === 'POST') {
+            console.log('=== POST REQUEST DETECTED ===');
+            console.log('Raw body type:', typeof req.body);
+            console.log('Raw body length:', req.body ? (req.body.length || Object.keys(req.body).length || 'unknown') : 0);
+            console.log('Content-Type:', req.get('content-type'));
+            console.log('Content-Length:', req.get('content-length'));
+            console.log('Request headers:', JSON.stringify(req.headers, null, 2));
+            
+            if (req.body) {
+                if (typeof req.body === 'string') {
+                    console.log('Body (string):', req.body.substring(0, 500));
+                } else if (Buffer.isBuffer(req.body)) {
+                    console.log('Body (buffer):', req.body.toString().substring(0, 500));
+                } else if (typeof req.body === 'object') {
+                    console.log('Body (object):', JSON.stringify(req.body, null, 2));
+                }
+            } else {
+                console.log('No body found in request');
+            }
+            console.log('=== END POST DEBUG ===');
+        }
         
         // Extract target from query parameters
         const target = req.query.hmtarget;
@@ -482,9 +718,6 @@ async function handleRequest(req, res, next) {
         console.log('Clean target:', cleanTarget);
 
         // For the new URL structure, we need to use the actual request path
-        // Example: //localhost:3000/cdn/shop/assets/file.js?v=123&hmtarget=domain.com&hmtype=1
-        // Should become: https://domain.com/cdn/shop/assets/file.js?v=123
-        
         const requestPath = req.path; // This will be /cdn/shop/assets/file.js
         
         // Remove proxy-specific parameters from query
@@ -501,9 +734,32 @@ async function handleRequest(req, res, next) {
         console.log('Clean query params:', cleanQuery);
         console.log('Final target URL:', targetUrl);
 
-        // Prepare headers
-        const hasBody = req.method !== 'GET' && req.method !== 'HEAD' && req.body;
+        // Prepare headers and body
+        const hasBody = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.body;
         const headers = getCommonHeaders(cleanTarget, req.headers, hasBody);
+        
+        // Handle different content types for POST requests
+        let requestBody = null;
+        if (hasBody) {
+            if (req.get('content-type')?.includes('application/json')) {
+                requestBody = JSON.stringify(req.body);
+                console.log('Using JSON body:', requestBody);
+            } else if (req.get('content-type')?.includes('application/x-www-form-urlencoded')) {
+                // Express already parsed this into an object, convert back to form data
+                requestBody = new URLSearchParams(req.body).toString();
+                console.log('Using form-encoded body:', requestBody);
+            } else if (Buffer.isBuffer(req.body)) {
+                requestBody = req.body;
+                console.log('Using buffer body, length:', req.body.length);
+            } else if (typeof req.body === 'string') {
+                requestBody = req.body;
+                console.log('Using string body:', requestBody.substring(0, 200));
+            } else {
+                // Fallback: try to JSON stringify
+                requestBody = JSON.stringify(req.body);
+                console.log('Using fallback JSON body:', requestBody);
+            }
+        }
         
         // Handle cart section requests - remove caching headers
         if (req.url.includes('sections=cart')) {
@@ -519,7 +775,7 @@ async function handleRequest(req, res, next) {
         const proxyRes = await makeProxyRequest(targetUrl, {
             method: req.method,
             headers: headers,
-            body: hasBody ? req.body : undefined
+            body: requestBody
         });
 
         console.log('Proxy response received, status:', proxyRes.status);
@@ -768,6 +1024,20 @@ app.get('/favicon.ico', (req, res) => {
     res.status(204).end(); // No content for favicon
 });
 
+// Test POST endpoint for debugging
+app.post('/test-post', (req, res) => {
+    console.log('=== TEST POST ENDPOINT ===');
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+    console.log('Body type:', typeof req.body);
+    res.json({ 
+        message: 'POST test successful', 
+        receivedBody: req.body,
+        bodyType: typeof req.body,
+        contentType: req.get('content-type')
+    });
+});
+
 app.get('/asset', handleAsset);
 app.post('/asset', handleAsset);
 app.put('/asset', handleAsset);
@@ -873,6 +1143,18 @@ app.listen(PORT, () => {
     
     const isDSrcCorrect = rewrittenDSrc === expectedDSrc;
     console.log('✅ D-SRC Attribute Test Result:', isDSrcCorrect ? 'PASS' : 'FAIL');
+    
+    // Test JavaScript interceptor injection
+    console.log('\n=== Testing JavaScript Interceptor Injection ===');
+    const testHtmlWithHead = '<html><head><title>Test</title></head><body>Content</body></html>';
+    console.log('Input HTML with head:', testHtmlWithHead);
+    
+    const rewrittenWithInterceptor = rewriteUrls(testHtmlWithHead, 'thejellybee.com', 'localhost:3000', 'http');
+    const hasInterceptor = rewrittenWithInterceptor.includes('Proxy interceptor loaded for target:');
+    console.log('Has interceptor script:', hasInterceptor ? 'YES' : 'NO');
+    console.log('Interceptor includes fetch override:', rewrittenWithInterceptor.includes('window.fetch = function') ? 'YES' : 'NO');
+    console.log('Interceptor includes XHR override:', rewrittenWithInterceptor.includes('window.XMLHttpRequest = function') ? 'YES' : 'NO');
+    console.log('✅ JavaScript Interceptor Test Result:', hasInterceptor ? 'PASS' : 'FAIL');
     
     console.log('=== End Tests ===\n');
 });
