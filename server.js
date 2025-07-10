@@ -108,7 +108,7 @@ function looksLikeHTML(body) {
     return patterns.some(pattern => pattern.test(checkText));
 }
 
-// URL rewriting function for HTML content
+// URL rewriting function for HTML content - ENHANCED VERSION
 function rewriteUrls(body, target, proxyHost, protocol = 'http') {
     if (!body) return body;
     
@@ -153,7 +153,7 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
             const domain = url.split('/')[2];
             const path = url.substring(2 + domain.length);
             const separator = path.includes('?') ? '&' : '?';
-            targetUrl = \`//\${proxyHost}\${path}\${separator}hmtarget=\${domain}&hmtype=1\`;
+            targetUrl = \`//\${proxyHost}\${path}\${separator}hmtarget=\${hmtarget}&hmtype=1\`;
         } else if (url.match(/^https?:\\/\\//)) {
             // Absolute URL: https://domain.com/path
             try {
@@ -445,7 +445,71 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
         return `${quote}${rewrittenUrl}${quote}`;
     });
 
-    // 7. Update main.js script tags with proper rewriting
+    // 7. NEW: Rewrite JavaScript template literals with window.location.origin
+    // Example: `${window.location.origin}/cart.js` 
+    // Should become: `${window.location.origin}/cart.js?hmtarget=${target}&hmtype=1`
+    content = content.replace(
+        /(\$\{window\.location\.origin\})(\/[^`'"}\s]*)/gi,
+        (match, originPart, path) => {
+            if (path.includes('hmtarget=')) return match; // Skip if already proxied
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenPath = `${path}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting template literal with window.location.origin:', match, '→', originPart + rewrittenPath);
+            return `${originPart}${rewrittenPath}`;
+        }
+    );
+
+    // 8. NEW: Rewrite other window.location dynamic URL constructions
+    // Example: window.location.origin + '/cart.js' or window.location.protocol + '//' + window.location.host + '/path'
+    content = content.replace(
+        /(window\.location\.origin\s*\+\s*['"`])(\/[^'"`]*?)(['"`])/gi,
+        (match, prefix, path, suffix) => {
+            if (path.includes('hmtarget=')) return match; // Skip if already proxied
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenPath = `${path}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting window.location.origin concatenation:', match, '→', prefix + rewrittenPath + suffix);
+            return `${prefix}${rewrittenPath}${suffix}`;
+        }
+    );
+
+    // 9. NEW: Rewrite window.location.protocol + '//' + window.location.host constructions
+    content = content.replace(
+        /(window\.location\.protocol\s*\+\s*['"`]\/\/['"`]\s*\+\s*window\.location\.host\s*\+\s*['"`])(\/[^'"`]*?)(['"`])/gi,
+        (match, prefix, path, suffix) => {
+            if (path.includes('hmtarget=')) return match; // Skip if already proxied
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenPath = `${path}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting window.location protocol+host concatenation:', match, '→', prefix + rewrittenPath + suffix);
+            return `${prefix}${rewrittenPath}${suffix}`;
+        }
+    );
+
+    // 10. NEW: Rewrite fetch() calls with template literals and relative URLs in JavaScript
+    // Example: fetch(`/cart.js`) or fetch('/cart.js')
+    content = content.replace(
+        /(fetch\s*\(\s*[`'"])(\/.+?)([`'"]\s*\))/gi,
+        (match, prefix, path, suffix) => {
+            if (path.includes('hmtarget=')) return match; // Skip if already proxied
+            
+            // Check if path already has query parameters
+            const separator = path.includes('?') ? '&' : '?';
+            const rewrittenPath = `${path}${separator}hmtarget=${target}&hmtype=1`;
+            
+            console.log('Rewriting fetch() relative URL:', match, '→', prefix + rewrittenPath + suffix);
+            return `${prefix}${rewrittenPath}${suffix}`;
+        }
+    );
+
+    // 11. Update main.js script tags with proper rewriting
     content = content.replace(
         /(<script[^>]*src=["'])((?:\/\/|https?:\/\/)([^\/]+))(\/[^"']*main\.js[^"']*)(["'][^>]*)(>)/gi,
         (match, prefix, fullDomain, domain, path, suffix, closing) => {
@@ -1144,6 +1208,48 @@ app.listen(PORT, () => {
     const isDSrcCorrect = rewrittenDSrc === expectedDSrc;
     console.log('✅ D-SRC Attribute Test Result:', isDSrcCorrect ? 'PASS' : 'FAIL');
     
+    // Test NEW: JavaScript template literal rewriting
+    console.log('\n=== Testing Template Literal Rewriting (NEW) ===');
+    const testTemplateLiteral = 'fetch(`${window.location.origin}/cart.js`)';
+    console.log('Input JS:', testTemplateLiteral);
+    
+    const rewrittenTemplate = rewriteUrls(testTemplateLiteral, 'thejellybee.com', 'localhost:3000', 'http');
+    console.log('Output JS:', rewrittenTemplate);
+    
+    const expectedTemplate = 'fetch(`${window.location.origin}/cart.js?hmtarget=thejellybee.com&hmtype=1`)';
+    console.log('Expected JS:', expectedTemplate);
+    
+    const isTemplateCorrect = rewrittenTemplate === expectedTemplate;
+    console.log('✅ Template Literal Test Result:', isTemplateCorrect ? 'PASS' : 'FAIL');
+    
+    // Test NEW: window.location.origin concatenation
+    console.log('\n=== Testing Window Location Concatenation (NEW) ===');
+    const testConcatenation = 'window.location.origin + "/cart.js"';
+    console.log('Input JS:', testConcatenation);
+    
+    const rewrittenConcat = rewriteUrls(testConcatenation, 'thejellybee.com', 'localhost:3000', 'http');
+    console.log('Output JS:', rewrittenConcat);
+    
+    const expectedConcat = 'window.location.origin + "/cart.js?hmtarget=thejellybee.com&hmtype=1"';
+    console.log('Expected JS:', expectedConcat);
+    
+    const isConcatCorrect = rewrittenConcat === expectedConcat;
+    console.log('✅ Concatenation Test Result:', isConcatCorrect ? 'PASS' : 'FAIL');
+    
+    // Test NEW: direct fetch() rewriting
+    console.log('\n=== Testing Direct Fetch Rewriting (NEW) ===');
+    const testFetch = 'fetch("/cart/add.js")';
+    console.log('Input JS:', testFetch);
+    
+    const rewrittenFetch = rewriteUrls(testFetch, 'thejellybee.com', 'localhost:3000', 'http');
+    console.log('Output JS:', rewrittenFetch);
+    
+    const expectedFetch = 'fetch("/cart/add.js?hmtarget=thejellybee.com&hmtype=1")';
+    console.log('Expected JS:', expectedFetch);
+    
+    const isFetchCorrect = rewrittenFetch === expectedFetch;
+    console.log('✅ Direct Fetch Test Result:', isFetchCorrect ? 'PASS' : 'FAIL');
+    
     // Test JavaScript interceptor injection
     console.log('\n=== Testing JavaScript Interceptor Injection ===');
     const testHtmlWithHead = '<html><head><title>Test</title></head><body>Content</body></html>';
@@ -1157,6 +1263,15 @@ app.listen(PORT, () => {
     console.log('✅ JavaScript Interceptor Test Result:', hasInterceptor ? 'PASS' : 'FAIL');
     
     console.log('=== End Tests ===\n');
+    
+    // Summary of NEW features
+    console.log('🚀 NEW FEATURES ADDED:');
+    console.log('✅ Template literal rewriting: `${window.location.origin}/cart.js`');
+    console.log('✅ String concatenation rewriting: window.location.origin + "/cart.js"');
+    console.log('✅ Protocol+host concatenation rewriting');
+    console.log('✅ Direct fetch() rewriting: fetch("/cart.js")');
+    console.log('✅ Enhanced Add to Cart functionality support');
+    console.log('=== Ready for E-commerce Testing! ===\n');
 });
 
 // Graceful shutdown
