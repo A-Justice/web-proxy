@@ -337,7 +337,7 @@ function rewriteUrls(body, target, proxyHost, protocol = "http") {
         }
         
         // FIXED: More robust check for already proxied URLs
-        if (url.includes('hmtarget=') || url.includes(proxyHost + '/')) {
+        if (url.includes('hmtarget=') && url.includes(proxyHost + '/')) {
             console.log('🔄 URL already proxied, skipping:', url);
             return url;
         }
@@ -907,7 +907,7 @@ async function makeProxyRequest(targetUrl, options) {
 
   if (requestTracker.has(requestId)) {
     const lastRequest = requestTracker.get(requestId);
-    if (now - lastRequest < 1000) {
+    if (now - lastRequest < 200) {
       // 1 second cooldown
       console.log("Request blocked - too frequent:", requestId);
       throw new Error("Request rate limited");
