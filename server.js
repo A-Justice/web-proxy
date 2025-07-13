@@ -489,6 +489,42 @@ function rewriteUrls(body, target, proxyHost, protocol = 'http') {
             return `${prefix}${rewrittenPath}${suffix}`;
         }
     );
+
+     // 10. Root URL (just "/")
+     content = content.replace(
+        /((?:src|href|action|data-src|data-href|d-src|poster|background|cite|formaction)\s*=\s*["'])(\/)(["'])/gi,
+        (match, prefix, path, suffix) => {
+            console.log('🔍 DEBUGGING: Found root URL:', match);
+            const rewrittenUrl = `${protocol}://${proxyHost}/?hmtarget=${target}&hmtype=1`;
+            console.log('🔍 DEBUGGING: Rewritten root URL to:', `${prefix}${rewrittenUrl}${suffix}`);
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
+
+    // 11. Query-only URLs (just "?")
+    content = content.replace(
+        /((?:src|href|action|data-src|data-href|d-src|poster|background|cite|formaction)\s*=\s*["'])(\?)([^"']*)(["'])/gi,
+        (match, prefix, questionMark, query, suffix) => {
+            if (query.includes('hmtarget=')) return match;
+            
+            console.log('🔍 DEBUGGING: Found query-only URL:', match);
+            const separator = query ? '&' : '';
+            const rewrittenUrl = `${protocol}://${proxyHost}/?${query}${separator}hmtarget=${target}&hmtype=1`;
+            console.log('🔍 DEBUGGING: Rewritten query-only URL to:', `${prefix}${rewrittenUrl}${suffix}`);
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
+
+    // 12. Empty URLs (href="" or src="")
+    content = content.replace(
+        /((?:href|action)\s*=\s*["'])(["'])/gi,
+        (match, prefix, suffix) => {
+            console.log('🔍 DEBUGGING: Found empty URL:', match);
+            const rewrittenUrl = `${protocol}://${proxyHost}/?hmtarget=${target}&hmtype=1`;
+            console.log('🔍 DEBUGGING: Rewritten empty URL to:', `${prefix}${rewrittenUrl}${suffix}`);
+            return `${prefix}${rewrittenUrl}${suffix}`;
+        }
+    );
     
     console.log('URL rewriting completed');
     return content;
