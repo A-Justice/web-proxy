@@ -2,6 +2,7 @@ const express = require("express");
 const dns = require("dns").promises;
 const url = require("url");
 const zlib = require("zlib");
+const fs = require("fs");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,6 +20,8 @@ const failedDomains = new Map();
 
 // Request tracking to prevent infinite loops
 const requestTracker = new Map();
+
+
 
 // Middleware for parsing request bodies
 app.use(express.json({ limit: "50mb" })); // For JSON payloads
@@ -167,7 +170,7 @@ function rewriteLocationHeader(location, target, proxyHost, protocol = "http") {
 }
 
 // FIXED: URL rewriting function with loop prevention
-function rewriteUrls(body, target, proxyHost, protocol = "http") {
+async function rewriteUrls(body, target, proxyHost, protocol = "http") {
   if (!body) return body;
 
   let content = body.toString();
@@ -182,11 +185,26 @@ function rewriteUrls(body, target, proxyHost, protocol = "http") {
     protocol
   );
 
+  let siteSpecificScript = "";
+
+  if (target?.includes("carnivoresnax")) {
+    try {
+      const scriptPath = require("path").join(__dirname, "site-specific-scripts", "carnivoresnacks.js");
+      const scriptContent = await fs.promises.readFile(scriptPath, "utf8");
+      siteSpecificScript = `<script>${scriptContent}</script>`;
+    } catch (e) {
+      console.error("Failed to load carnivoresnacks.js:", e);
+      siteSpecificScript = "";
+    }
+  }
+
   const domainLockScript = `
-    <script>
+<script>
 (function() {
     'use strict';
-       console.log('🛡️ SUPER EARLY DOMAIN LOCK ACTIVATED');
+    
+    // ENHANCED: Multiple-layer protection approach
+    console.log('🛡️ SUPER EARLY DOMAIN LOCK ACTIVATED');
     console.log('🛡️ Current location:', window.location.href);
     console.log('🛡️ Current host:', window.location.host);
     console.log('🛡️ Current hostname:', window.location.hostname);
@@ -195,115 +213,155 @@ function rewriteUrls(body, target, proxyHost, protocol = "http") {
     const PROXY_HOST = '${proxyHost}';
     const PROXY_PROTOCOL = '${protocol}:';
     
-    // NUCLEAR OPTION: Override ALL location properties immediately
-    const originalLocation = window.location;
+    // STRATEGY 1: Override critical location methods immediately
+    const originalAssign = window.location.assign;
+    const originalReplace = window.location.replace;
     
-    // Create a completely locked location object
-    const lockedLocation = {
-        href: originalLocation.href,
-        protocol: PROXY_PROTOCOL,
-        host: PROXY_HOST,
-        hostname: PROXY_HOST.split(':')[0],
-        port: PROXY_HOST.includes(':') ? PROXY_HOST.split(':')[1] : '',
-        pathname: originalLocation.pathname,
-        search: originalLocation.search,
-        hash: originalLocation.hash,
-        origin: PROXY_PROTOCOL + '//' + PROXY_HOST,
-        
-        toString: function() { return this.href; },
-        
-        assign: function(url) {
-            console.warn('🛡️ BLOCKED location.assign to:', url);
-            if (url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
-                console.warn('🛡️ Prevented domain hijack via assign');
-                return false;
-            } return originalLocation.assign(url);
-        },
-        
-        replace: function(url) {
-            console.warn('🛡️ BLOCKED location.replace to:', url);
-            if (url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
-                console.warn('🛡️ Prevented domain hijack via replace');
-                return false;
+    // Override location.assign
+    try {
+        window.location.assign = function(url) {
+            console.warn('🛡️ INTERCEPTED location.assign to:', url);
+            if (typeof url === 'string' && url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
+                console.warn('🛡️ BLOCKED domain hijack via assign - redirecting through proxy');
+                const separator = url.includes('?') ? '&' : '?';
+                const proxyUrl = url.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
+                return originalAssign.call(this, proxyUrl);
             }
-            return originalLocation.replace(url);
-        },
-        reload: function() {
-            return originalLocation.reload();
-        }// NUCLEAR: Override getters/setters for location properties
+            return originalAssign.call(this, url);
+        };
+        console.log('✅ Successfully overrode location.assign');
+    } catch (e) {
+        console.error('❌ Could not override location.assign:', e);
+    }
     
-        Object.defineProperty(lockedLocation, 'href', {
-        get: function() {
-            const current = originalLocation.href;
-            if (current.includes(TARGET_DOMAIN) && !current.includes(PROXY_HOST)) {
-                console.warn('🛡️ Detected domain hijack in href getter, correcting...');
-                return current.replace(TARGET_DOMAIN, PROXY_HOST);
-            }return current;
-        },
-        set: function(value) {
-            console.warn('🛡️ BLOCKED href set to:', value);
-            if (value.includes(TARGET_DOMAIN) && !value.includes(PROXY_HOST)) {
-                console.warn('🛡️ Prevented domain hijack via href setter');
-                return;
+    // Override location.replace
+    try {
+        window.location.replace = function(url) {
+            console.warn('🛡️ INTERCEPTED location.replace to:', url);
+            if (typeof url === 'string' && url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
+                console.warn('🛡️ BLOCKED domain hijack via replace - redirecting through proxy');
+                const separator = url.includes('?') ? '&' : '?';
+                const proxyUrl = url.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
+                return originalReplace.call(this, proxyUrl);
             }
-            originalLocation.href = value;
+            return originalReplace.call(this, url);
+        };
+        console.log('✅ Successfully overrode location.replace');
+    } catch (e) {
+        console.error('❌ Could not override location.replace:', e);
+    }
+    
+    // STRATEGY 2: Try to override href setter
+    try {
+        const originalDescriptor = Object.getOwnPropertyDescriptor(window.location, 'href') || 
+                                 Object.getOwnPropertyDescriptor(Location.prototype, 'href');
+        
+        if (originalDescriptor && originalDescriptor.set) {
+            const originalHrefSetter = originalDescriptor.set;
+            
+            Object.defineProperty(window.location, 'href', {
+                get: originalDescriptor.get,
+                set: function(value) {
+                    console.warn('🛡️ INTERCEPTED href set to:', value);
+                    if (typeof value === 'string' && value.includes(TARGET_DOMAIN) && !value.includes(PROXY_HOST)) {
+                        console.warn('🛡️ BLOCKED domain hijack via href setter - redirecting through proxy');
+                        const separator = value.includes('?') ? '&' : '?';
+                        const proxyUrl = value.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
+                        return originalHrefSetter.call(this, proxyUrl);
+                    }
+                    return originalHrefSetter.call(this, value);
+                },
+                configurable: true
+            });
+            console.log('✅ Successfully overrode location.href setter');
         }
-        
-        Object.defineProperty(lockedLocation, 'hostname', {
+    } catch (e) {
+        console.error('❌ Could not override location.href:', e);
+    }
+    
+    // STRATEGY 3: Override document.domain
+    try {
+        Object.defineProperty(document, 'domain', {
             get: function() { return PROXY_HOST.split(':')[0]; },
             set: function(value) {
-                console.warn('🛡️ BLOCKED hostname set to:', value);
+                console.warn('🛡️ BLOCKED document.domain set to:', value);
                 return PROXY_HOST.split(':')[0];
-            }});
-
-             Object.defineProperty(lockedLocation, 'host', {
-        get: function() { return PROXY_HOST; },
-        set: function(value) {
-            console.warn('🛡️ BLOCKED host set to:', value);
-            return PROXY_HOST;
-        } });
-
-        // NUCLEAR: Replace window.location entirely
-    try {
-        Object.defineProperty(window, 'location', {
-            get: function() { return lockedLocation; },
-            set: function(value) {
-                console.warn('🛡️ BLOCKED window.location set to:', value);
-                if (typeof value === 'string' && value.includes(TARGET_DOMAIN) && !value.includes(PROXY_HOST)) {
-                    console.warn('🛡️ Prevented domain hijack via window.location setter');
-                    return;
-                }
-                if (typeof value === 'string') {
-                    lockedLocation.href = value;
-                }
             },
-            configurable: false,
-            writable: false
+            configurable: false
         });
+        console.log('✅ Successfully locked document.domain');
     } catch (e) {
-        console.error('🛡️ Could not lock window.location:', e);
-    }// NUCLEAR: Monitor for any changes to location
+        console.error('❌ Could not lock document.domain:', e);
+    }
+    
+    // STRATEGY 4: Aggressive monitoring and correction
     let lastHref = window.location.href;
-    setInterval(function() {
-        const currentHref = originalLocation.href;
+    let monitoringActive = true;
+    
+    const locationMonitor = setInterval(function() {
+        if (!monitoringActive) return;
+        
+        const currentHref = window.location.href;
         if (currentHref !== lastHref) {
             console.warn('🛡️ DETECTED LOCATION CHANGE:', lastHref, '->', currentHref);
+            
+            // Check for domain hijacking pattern: target.com:3000
             if (currentHref.includes(TARGET_DOMAIN + ':') && !currentHref.includes(PROXY_HOST)) {
-                console.error('🛡️ CRITICAL: Domain hijack detected! Attempting to correct...');
+                console.error('🛡️ CRITICAL: Domain hijack detected! Pattern:', TARGET_DOMAIN + ':3000');
+                console.log('🛡️ Attempting immediate correction...');
+                
                 try {
-                    const correctedUrl = currentHref.replace(TARGET_DOMAIN, PROXY_HOST);
-                    console.log('🛡️ Attempting to correct to:', correctedUrl);
-                    originalLocation.replace(correctedUrl);
+                    monitoringActive = false; // Prevent recursive corrections
+                    const correctedUrl = currentHref.replace(TARGET_DOMAIN + ':', PROXY_HOST.split(':')[0] + ':');
+                    console.log('🛡️ Correcting to:', correctedUrl);
+                    window.location.replace(correctedUrl);
                 } catch (e) {
                     console.error('🛡️ Could not correct domain hijack:', e);
+                    monitoringActive = true; // Re-enable monitoring
+                }
+            } else if (currentHref.includes(TARGET_DOMAIN) && !currentHref.includes('hmtarget=')) {
+                console.error('🛡️ CRITICAL: Direct target domain access detected!');
+                console.log('🛡️ Attempting to add proxy parameters...');
+                
+                try {
+                    monitoringActive = false;
+                    const separator = currentHref.includes('?') ? '&' : '?';
+                    const correctedUrl = currentHref + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
+                    console.log('🛡️ Correcting to:', correctedUrl);
+                    window.location.replace(correctedUrl);
+                } catch (e) {
+                    console.error('🛡️ Could not add proxy parameters:', e);
+                    monitoringActive = true;
                 }
             }
+            
             lastHref = currentHref;
-        }}, 100); // Check every 100ms
-        console.log('🛡️ SUPER EARLY DOMAIN LOCK COMPLETED');
+        }
+    }, 50); // Check every 50ms for faster detection
+    
+    // STRATEGY 5: Override common redirect methods
+    const originalSetTimeout = window.setTimeout;
+    window.setTimeout = function(callback, delay) {
+        if (typeof callback === 'string' && callback.includes('location') && callback.includes(TARGET_DOMAIN)) {
+            console.warn('🛡️ BLOCKED malicious setTimeout with location change:', callback);
+            return;
+        }
+        return originalSetTimeout.apply(this, arguments);
+    };
+    
+    const originalSetInterval = window.setInterval;
+    window.setInterval = function(callback, delay) {
+        if (typeof callback === 'string' && callback.includes('location') && callback.includes(TARGET_DOMAIN)) {
+            console.warn('🛡️ BLOCKED malicious setInterval with location change:', callback);
+            return;
+        }
+        return originalSetInterval.apply(this, arguments);
+    };
+    
+    console.log('🛡️ MULTI-LAYER DOMAIN PROTECTION COMPLETED');
+    console.log('🛡️ Active protections: location.assign, location.replace, href setter, domain lock, monitoring');
 })();
-</script>
-    `;
+</script>`;
 
   // FIXED: Enhanced JavaScript proxy interceptor with better loop prevention
   const proxyInterceptorScript = `
@@ -605,14 +663,14 @@ function rewriteUrls(body, target, proxyHost, protocol = "http") {
   // Inject the script right after <head> or at the beginning of <body>
  // INJECT THE DOMAIN LOCK SCRIPT AT THE VERY BEGINNING
  if (content.includes('<!DOCTYPE')) {
-    content = content.replace('<!DOCTYPE', domainLockScript + proxyInterceptorScript + '<!DOCTYPE');
+    content = content.replace('<!DOCTYPE', siteSpecificScript + domainLockScript + proxyInterceptorScript + '<!DOCTYPE');
 } else if (content.includes('<html')) {
-    content = content.replace('<html', domainLockScript + proxyInterceptorScript + '<html');
+    content = content.replace('<html', siteSpecificScript + domainLockScript + proxyInterceptorScript + '<html');
 } else if (content.includes('<head>')) {
-    content = content.replace('<head>', '<head>' + domainLockScript + proxyInterceptorScript);
+    content = content.replace('<head>', '<head>' + siteSpecificScript + domainLockScript + proxyInterceptorScript);
 } else {
     // Fallback: prepend to the beginning
-    content = domainLockScript + proxyInterceptorScript + content;
+    content = siteSpecificScript + domainLockScript + proxyInterceptorScript + content;
 }
 
   // Remove problematic scripts
@@ -1212,7 +1270,7 @@ async function handleRequest(req, res, next) {
     if (isHtml) {
       console.log("Processing HTML content with URL rewriting");
       const protocol = req.protocol || req.get("x-forwarded-proto") || "http";
-      const rewrittenBody = rewriteUrls(
+      const rewrittenBody = await rewriteUrls(
         proxyRes.body,
         cleanTarget,
         req.get("host"),
