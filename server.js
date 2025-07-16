@@ -21,8 +21,6 @@ const failedDomains = new Map();
 // Request tracking to prevent infinite loops
 const requestTracker = new Map();
 
-
-
 // Middleware for parsing request bodies
 app.use(express.json({ limit: "50mb" })); // For JSON payloads
 app.use(express.urlencoded({ extended: true, limit: "50mb" })); // For form data
@@ -170,7 +168,13 @@ function rewriteLocationHeader(location, target, proxyHost, protocol = "http") {
 }
 
 // FIXED: URL rewriting function with loop prevention
-async function rewriteUrls(body, target, proxyHost, protocol = "http") {
+async function rewriteUrls(
+  body,
+  target,
+  proxyHost,
+  protocol = "http",
+  fileType
+) {
   if (!body) return body;
 
   let content = body.toString();
@@ -189,7 +193,11 @@ async function rewriteUrls(body, target, proxyHost, protocol = "http") {
 
   if (target?.includes("carnivoresnax")) {
     try {
-      const scriptPath = require("path").join(__dirname, "site-specific-scripts", "carnivoresnacks.js");
+      const scriptPath = require("path").join(
+        __dirname,
+        "site-specific-scripts",
+        "carnivoresnacks.js"
+      );
       const scriptContent = await fs.promises.readFile(scriptPath, "utf8");
       siteSpecificScript = `<script>${scriptContent}</script>`;
     } catch (e) {
@@ -444,6 +452,7 @@ async function rewriteUrls(body, target, proxyHost, protocol = "http") {
     const pendingRequests = new Map();
     
     window.fetch = function(input, init) {
+        debugger;
         let url = input;
         if (input instanceof Request) {
             url = input.url;
@@ -497,6 +506,7 @@ async function rewriteUrls(body, target, proxyHost, protocol = "http") {
         
         xhr.open = function(method, url, async, user, password) {
             try {
+                debugger;
                 const rewrittenUrl = rewriteUrl(url);
                 console.log('📡 XHR intercepted:', url, '→', rewrittenUrl);
                 return originalOpen.call(this, method, rewrittenUrl, async, user, password);
@@ -581,7 +591,77 @@ async function rewriteUrls(body, target, proxyHost, protocol = "http") {
     }, true);
     
     console.log('✅ Proxy interceptor fully loaded and active');
+
+    (function patchElementCreation() {
+    const originalCreateElement = Document.prototype.createElement;
+
+    Document.prototype.createElement = function(tagName, ...args) {
+        const element = originalCreateElement.call(this, tagName, ...args);
+        const lowerTag = tagName.toLowerCase();
+
+        // Patch <script> tags
+        if (lowerTag === 'script') {
+            const originalSetAttribute = element.setAttribute.bind(element);
+
+            Object.defineProperty(element, 'src', {
+                get() {
+                    return element.getAttribute('src');
+                },
+                set(value) {
+                    const rewritten = rewriteUrl(value);
+                    console.log('🧠 [createElement] Script src rewritten:', value, '→', rewritten);
+                    originalSetAttribute('src', rewritten);
+                },
+                configurable: true,
+                enumerable: true,
+            });
+
+            element.setAttribute = function(name, value) {
+                if (name === 'src') {
+                    const rewritten = rewriteUrl(value);
+                    console.log('🧠 [setAttribute] Script src rewritten:', value, '→', rewritten);
+                    return originalSetAttribute(name, rewritten);
+                }
+                return originalSetAttribute(name, value);
+            };
+        }
+
+        // Patch <link rel="stylesheet">
+        if (lowerTag === 'link') {
+            const originalSetAttribute = element.setAttribute.bind(element);
+
+            Object.defineProperty(element, 'href', {
+                get() {
+                    return element.getAttribute('href');
+                },
+                set(value) {
+                    const rewritten = rewriteUrl(value);
+                    console.log('🎨 [createElement] Link href rewritten:', value, '→', rewritten);
+                    originalSetAttribute('href', rewritten);
+                },
+                configurable: true,
+                enumerable: true,
+            });
+
+            element.setAttribute = function(name, value) {
+                if (name === 'href') {
+                    const rewritten = rewriteUrl(value);
+                    console.log('🎨 [setAttribute] Link href rewritten:', value, '→', rewritten);
+                    return originalSetAttribute(name, rewritten);
+                }
+                return originalSetAttribute(name, value);
+            };
+        }
+
+        return element;
+    };
+    })();
+
+
 })();
+
+  
+
 </script>`;
 
   // CRITICAL: Remove ALL meta refresh tags
@@ -661,17 +741,30 @@ async function rewriteUrls(body, target, proxyHost, protocol = "http") {
   }
 
   // Inject the script right after <head> or at the beginning of <body>
- // INJECT THE DOMAIN LOCK SCRIPT AT THE VERY BEGINNING
- if (content.includes('<!DOCTYPE')) {
-    content = content.replace('<!DOCTYPE', siteSpecificScript + domainLockScript + proxyInterceptorScript + '<!DOCTYPE');
-} else if (content.includes('<html')) {
-    content = content.replace('<html', siteSpecificScript + domainLockScript + proxyInterceptorScript + '<html');
-} else if (content.includes('<head>')) {
-    content = content.replace('<head>', '<head>' + siteSpecificScript + domainLockScript + proxyInterceptorScript);
-} else {
+  // INJECT THE DOMAIN LOCK SCRIPT AT THE VERY BEGINNING
+  if (content.includes("<!DOCTYPE")) {
+    content = content.replace(
+      "<!DOCTYPE",
+      siteSpecificScript +
+        domainLockScript +
+        proxyInterceptorScript +
+        "<!DOCTYPE"
+    );
+  } else if (content.includes("<html")) {
+    content = content.replace(
+      "<html",
+      siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
+    );
+  } else if (content.includes("<head>")) {
+    content = content.replace(
+      "<head>",
+      "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
+    );
+  } else {
     // Fallback: prepend to the beginning
-    content = siteSpecificScript + domainLockScript + proxyInterceptorScript + content;
-}
+    content =
+      siteSpecificScript + domainLockScript + proxyInterceptorScript + content;
+  }
 
   // Remove problematic scripts
   content = content.replace(
@@ -965,10 +1058,10 @@ async function makeProxyRequest(targetUrl, options) {
 
   if (requestTracker.has(requestId)) {
     const lastRequest = requestTracker.get(requestId);
-    if (now - lastRequest < 200) {
+    if (now - lastRequest < 50) {
       // 1 second cooldown
       console.log("Request blocked - too frequent:", requestId);
-      throw new Error("Request rate limited");
+      //throw new Error("Request rate limited");
     }
   }
   requestTracker.set(requestId, now);
@@ -1029,7 +1122,7 @@ async function makeProxyRequest(targetUrl, options) {
 
       const response = await fetch(currentUrl, requestOptions);
 
-        // CRITICAL: Handle redirects aggressively
+      // CRITICAL: Handle redirects aggressively
       if (
         response.status >= 300 &&
         response.status < 400 &&
@@ -1044,22 +1137,28 @@ async function makeProxyRequest(targetUrl, options) {
         if (!newUrl.match(/^https?:\/\//)) {
           const baseUrl = new URL(currentUrl);
           newUrl = baseUrl.origin + newUrl;
-          console.log('🔍 DEBUGGING: Made redirect absolute:', newUrl);
+          console.log("🔍 DEBUGGING: Made redirect absolute:", newUrl);
         }
 
-         // CRITICAL: Check if redirect is trying to hijack domain
-         try {
-            const redirectUrl = new URL(newUrl);
-            const originalUrl = new URL(currentUrl);
-            
-            if (redirectUrl.hostname !== originalUrl.hostname) {
-                console.warn('🛡️ SUSPICIOUS: Cross-domain redirect detected');
-                console.warn('🛡️ From:', originalUrl.hostname, 'to:', redirectUrl.hostname);
-            }
+        // CRITICAL: Check if redirect is trying to hijack domain
+        try {
+          const redirectUrl = new URL(newUrl);
+          const originalUrl = new URL(currentUrl);
+
+          if (redirectUrl.hostname !== originalUrl.hostname) {
+            console.warn("🛡️ SUSPICIOUS: Cross-domain redirect detected");
+            console.warn(
+              "🛡️ From:",
+              originalUrl.hostname,
+              "to:",
+              redirectUrl.hostname
+            );
+          }
         } catch (e) {
-            console.log('🔍 DEBUGGING: Could not parse redirect URLs for analysis');
+          console.log(
+            "🔍 DEBUGGING: Could not parse redirect URLs for analysis"
+          );
         }
-
 
         currentUrl = newUrl;
         console.log("Following redirect to:", currentUrl);
@@ -1135,8 +1234,17 @@ async function handleRequest(req, res, next) {
       }
     }
 
+    let refererHmtarget;
+    const referer = req.headers["referer"];
+    const requestHost = req.get("host");
+    if (referer && !req.query.hmtarget && referer.includes(requestHost)) {
+      const url = new URL(referer);
+      const urlParams = new URLSearchParams(url.search);
+      refererHmtarget = urlParams.get("hmtarget");
+    }
+
     // Extract target from query parameters
-    const target = req.query.hmtarget;
+    const target = req.query.hmtarget ?? refererHmtarget;
     if (!target) {
       return res.status(400).send("No target specified");
     }
@@ -1220,13 +1328,23 @@ async function handleRequest(req, res, next) {
     }
 
     // CRITICAL: Check for Location header and rewrite it
-    if (proxyRes.headers['location']) {
-        const originalLocation = proxyRes.headers['location'];
-        const rewrittenLocation = rewriteLocationHeader(originalLocation, cleanTarget, req.get('host'), req.protocol || 'http');
-        if (rewrittenLocation !== originalLocation) {
-            proxyRes.headers['location'] = rewrittenLocation;
-            console.log('🛡️ REWRITTEN Location header:', originalLocation, '->', rewrittenLocation);
-        }
+    if (proxyRes.headers["location"]) {
+      const originalLocation = proxyRes.headers["location"];
+      const rewrittenLocation = rewriteLocationHeader(
+        originalLocation,
+        cleanTarget,
+        req.get("host"),
+        req.protocol || "http"
+      );
+      if (rewrittenLocation !== originalLocation) {
+        proxyRes.headers["location"] = rewrittenLocation;
+        console.log(
+          "🛡️ REWRITTEN Location header:",
+          originalLocation,
+          "->",
+          rewrittenLocation
+        );
+      }
     }
 
     // Set response status and headers
@@ -1251,13 +1369,13 @@ async function handleRequest(req, res, next) {
       }
     });
 
-   // Force our own CSP
-   res.set('Content-Security-Policy', 'frame-ancestors *');
-        
-   // CRITICAL: Add no-cache headers to prevent caching issues
-   res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-   res.set('Pragma', 'no-cache');
-   res.set('Expires', '0');
+    // Force our own CSP
+    res.set("Content-Security-Policy", "frame-ancestors *");
+
+    // CRITICAL: Add no-cache headers to prevent caching issues
+    res.set("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
 
     // Process response body
     const contentType = proxyRes.headers["content-type"] || "";
