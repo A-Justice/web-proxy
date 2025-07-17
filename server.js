@@ -452,7 +452,6 @@ async function rewriteUrls(
     const pendingRequests = new Map();
     
     window.fetch = function(input, init) {
-        debugger;
         let url = input;
         if (input instanceof Request) {
             url = input.url;
@@ -506,7 +505,6 @@ async function rewriteUrls(
         
         xhr.open = function(method, url, async, user, password) {
             try {
-                debugger;
                 const rewrittenUrl = rewriteUrl(url);
                 console.log('📡 XHR intercepted:', url, '→', rewrittenUrl);
                 return originalOpen.call(this, method, rewrittenUrl, async, user, password);
@@ -760,11 +758,13 @@ async function rewriteUrls(
       "<head>",
       "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
     );
-  } else {
-    // Fallback: prepend to the beginning
-    content =
-      siteSpecificScript + domainLockScript + proxyInterceptorScript + content;
-  }
+  } 
+  // else {
+  //   // This is commented out because it was adding <script></script> tags to some js files
+  //   // Fallback: prepend to the beginning
+  //   content =
+  //     siteSpecificScript + domainLockScript + proxyInterceptorScript + content;
+  // }
 
   // Remove problematic scripts
   content = content.replace(
@@ -1214,9 +1214,41 @@ async function makeProxyRequest(targetUrl, options) {
   throw new Error("Maximum retries exceeded");
 }
 
+function movePayloadBeforeHmtarget(url) {
+  const _url = url?.toLowerCase();
+  if(!_url.includes('hmtarget='))
+    return url;
+  else if(url.includes('hmtarget=') && url.endsWith('=1'))
+    return url;
+
+  const match = url.match(/hmtype=1([^&]*)/);
+  if (!match) return url; // nothing to do
+
+  const payload = match[1]; // everything after 'hmtype=1'
+  if (!payload) return url; // no payload, leave unchanged
+
+  // Remove the payload from hmtype
+  let updated = url.replace(/hmtype=1[^&]*/, "hmtype=1");
+
+  // Insert the payload before ?hmtarget or &hmtarget
+  updated = updated.replace(/([?&])hmtarget=/, `${payload}&hmtarget=`);
+
+  return updated;
+}
+
 // FIXED: Enhanced main request handler with better error handling
 async function handleRequest(req, res, next) {
   try {
+    const sanitizedUrl = movePayloadBeforeHmtarget(req.url);
+    req.url = sanitizedUrl;
+    req.originalUrl = sanitizedUrl;
+
+    // Parse the new URL and update query parameters
+    const urlParts = url.parse(sanitizedUrl, true);
+    req.path = urlParts.pathname;
+    req.query = urlParts.query;
+    req._parsedUrl = urlParts;
+
     console.log("=== New Request ===");
     console.log("Request URL:", req.url);
     console.log("Request method:", req.method);
