@@ -740,23 +740,16 @@ async function rewriteUrls(
 
   // Inject the script right after <head> or at the beginning of <body>
   // INJECT THE DOMAIN LOCK SCRIPT AT THE VERY BEGINNING
-  if (content.includes("<!DOCTYPE")) {
-    content = content.replace(
-      "<!DOCTYPE",
-      siteSpecificScript +
-        domainLockScript +
-        proxyInterceptorScript +
-        "<!DOCTYPE"
-    );
-  } else if (content.includes("<html")) {
-    content = content.replace(
-      "<html",
-      siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
-    );
-  } else if (content.includes("<head>")) {
+  if (content.includes("<head>")) {
     content = content.replace(
       "<head>",
       "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
+    );
+  } 
+  else if (content.includes("<html")) {
+    content = content.replace(
+      "<html",
+      siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
     );
   } 
   // else {
@@ -875,10 +868,11 @@ async function rewriteUrls(
         } catch (e) {
           return match;
         }
-      } else if (url.startsWith("/")) {
+      } 
+      else if (url.startsWith("/")) {
         const separator = url.includes("?") ? "&" : "?";
         const rewrittenUrl = `${protocol}://${proxyHost}${url}${separator}hmtarget=${target}&hmtype=1`;
-        return `url("${rewrittenUrl}")`;
+        return `url('${rewrittenUrl}')`;
       }
       return match;
     }
