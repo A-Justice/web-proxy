@@ -225,67 +225,6 @@ async function rewriteUrls(
     const originalAssign = window.location.assign;
     const originalReplace = window.location.replace;
     
-    // Override location.assign
-    try {
-        window.location.assign = function(url) {
-            console.warn('🛡️ INTERCEPTED location.assign to:', url);
-            if (typeof url === 'string' && url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
-                console.warn('🛡️ BLOCKED domain hijack via assign - redirecting through proxy');
-                const separator = url.includes('?') ? '&' : '?';
-                const proxyUrl = url.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
-                return originalAssign.call(this, proxyUrl);
-            }
-            return originalAssign.call(this, url);
-        };
-        console.log('✅ Successfully overrode location.assign');
-    } catch (e) {
-        console.error('❌ Could not override location.assign:', e);
-    }
-    
-    // Override location.replace
-    try {
-        window.location.replace = function(url) {
-            console.warn('🛡️ INTERCEPTED location.replace to:', url);
-            if (typeof url === 'string' && url.includes(TARGET_DOMAIN) && !url.includes(PROXY_HOST)) {
-                console.warn('🛡️ BLOCKED domain hijack via replace - redirecting through proxy');
-                const separator = url.includes('?') ? '&' : '?';
-                const proxyUrl = url.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
-                return originalReplace.call(this, proxyUrl);
-            }
-            return originalReplace.call(this, url);
-        };
-        console.log('✅ Successfully overrode location.replace');
-    } catch (e) {
-        console.error('❌ Could not override location.replace:', e);
-    }
-    
-    // STRATEGY 2: Try to override href setter
-    try {
-        const originalDescriptor = Object.getOwnPropertyDescriptor(window.location, 'href') || 
-                                 Object.getOwnPropertyDescriptor(Location.prototype, 'href');
-        
-        if (originalDescriptor && originalDescriptor.set) {
-            const originalHrefSetter = originalDescriptor.set;
-            
-            Object.defineProperty(window.location, 'href', {
-                get: originalDescriptor.get,
-                set: function(value) {
-                    console.warn('🛡️ INTERCEPTED href set to:', value);
-                    if (typeof value === 'string' && value.includes(TARGET_DOMAIN) && !value.includes(PROXY_HOST)) {
-                        console.warn('🛡️ BLOCKED domain hijack via href setter - redirecting through proxy');
-                        const separator = value.includes('?') ? '&' : '?';
-                        const proxyUrl = value.replace(TARGET_DOMAIN, PROXY_HOST) + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';
-                        return originalHrefSetter.call(this, proxyUrl);
-                    }
-                    return originalHrefSetter.call(this, value);
-                },
-                configurable: true
-            });
-            console.log('✅ Successfully overrode location.href setter');
-        }
-    } catch (e) {
-        console.error('❌ Could not override location.href:', e);
-    }
     
     // STRATEGY 3: Override document.domain
     try {
@@ -687,7 +626,9 @@ async function rewriteUrls(
     console.log("🛡️ REMOVED", baseMatches.length, "base href tags");
   }
 
-  // CRITICAL: Remove/neutralize JavaScript that changes location
+
+  if(target?.includes('jerusalemsandals.com')){
+      // CRITICAL: Remove/neutralize JavaScript that changes location
   const locationChangePatterns = [
     /window\.location\s*=\s*["'][^"']*["']/gi,
     /document\.location\s*=\s*["'][^"']*["']/gi,
@@ -695,26 +636,28 @@ async function rewriteUrls(
     /location\.replace\s*\([^)]*\)/gi,
     /location\.assign\s*\([^)]*\)/gi,
     /window\.location\.href\s*=\s*["'][^"']*["']/gi,
+    /window\.location\.replace\s*\([^)]*\)\)/gi,
     /window\.location\.replace\s*\([^)]*\)/gi,
     /window\.location\.assign\s*\([^)]*\)/gi,
   ];
+    locationChangePatterns.forEach((pattern, index) => {
+      let matches = content.match(pattern);
+      if (matches) {
+        console.log(
+          `🔍 DEBUGGING: Found location change pattern ${index}:`,
+          matches
+        );
+        content = content.replace(pattern, (match) => {
+          console.log("🛡️ NEUTRALIZED location change:", match);
+          return `console.warn('🛡️ Blocked location change: ${match.replace(
+            /'/g,
+            "\\'"
+          )}')`;
+        });
+      }
+    });
+  }
 
-  locationChangePatterns.forEach((pattern, index) => {
-    let matches = content.match(pattern);
-    if (matches) {
-      console.log(
-        `🔍 DEBUGGING: Found location change pattern ${index}:`,
-        matches
-      );
-      content = content.replace(pattern, (match) => {
-        console.log("🛡️ NEUTRALIZED location change:", match);
-        return `console.warn('🛡️ Blocked location change: ${match.replace(
-          /'/g,
-          "\\'"
-        )}');`;
-      });
-    }
-  });
 
   // SUPER AGGRESSIVE: Remove any script tags that mention the target domain
   const targetDomainScriptRegex = new RegExp(
@@ -1405,13 +1348,12 @@ async function handleRequest(req, res, next) {
 
     // Process response body
     const contentType = proxyRes.headers["content-type"] || "";
-    const isHtml =
+    let shouldReplaceUrls = 
       contentType.includes("text/html") || looksLikeHTML(proxyRes.body);
 
-    console.log("Content-Type:", contentType);
-    console.log("Is HTML:", isHtml);
+    shouldReplaceUrls = !contentType.startsWith('image/');
 
-    if (isHtml) {
+    if (shouldReplaceUrls) {
       console.log("Processing HTML content with URL rewriting");
       const protocol = req.protocol || req.get("x-forwarded-proto") || "http";
       const rewrittenBody = await rewriteUrls(
