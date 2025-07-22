@@ -167,6 +167,21 @@ function rewriteLocationHeader(location, target, proxyHost, protocol = "http") {
   return location;
 }
 
+async function getSiteSpecificScriptContent(fileName) {
+  try {
+    const scriptPath = require("path").join(
+      __dirname,
+      "site-specific-scripts",
+      fileName
+    );
+    const scriptContent = await fs.promises.readFile(scriptPath, "utf8");
+    return `<script>${scriptContent}</script>`;
+  } catch (e) {
+    console.error("Failed to load carnivoresnacks.js:", e);
+    return "";
+  }
+}
+
 // FIXED: URL rewriting function with loop prevention
 async function rewriteUrls(
   body,
@@ -191,19 +206,15 @@ async function rewriteUrls(
 
   let siteSpecificScript = "";
 
-  if (target?.includes("carnivoresnax")) {
-    try {
-      const scriptPath = require("path").join(
-        __dirname,
-        "site-specific-scripts",
-        "carnivoresnacks.js"
-      );
-      const scriptContent = await fs.promises.readFile(scriptPath, "utf8");
-      siteSpecificScript = `<script>${scriptContent}</script>`;
-    } catch (e) {
-      console.error("Failed to load carnivoresnacks.js:", e);
-      siteSpecificScript = "";
-    }
+  if (target?.includes("buddynutrition")) {
+    siteSpecificScript = `<script>
+      window.T4Srequest = {};
+      window.T4Sroutes = {};
+    </script>`;
+  } else if (target?.includes("carnivoresnax")) {
+      siteSpecificScript = await getSiteSpecificScriptContent("carnivoresnacks.js");
+  } else if (target?.includes("byltbasics")) {
+    siteSpecificScript = await getSiteSpecificScriptContent("byltbasics.js");
   }
 
   const domainLockScript = `
@@ -626,20 +637,19 @@ async function rewriteUrls(
     console.log("🛡️ REMOVED", baseMatches.length, "base href tags");
   }
 
-
-  if(target?.includes('jerusalemsandals.com')){
-      // CRITICAL: Remove/neutralize JavaScript that changes location
-  const locationChangePatterns = [
-    /window\.location\s*=\s*["'][^"']*["']/gi,
-    /document\.location\s*=\s*["'][^"']*["']/gi,
-    /location\.href\s*=\s*["'][^"']*["']/gi,
-    /location\.replace\s*\([^)]*\)/gi,
-    /location\.assign\s*\([^)]*\)/gi,
-    /window\.location\.href\s*=\s*["'][^"']*["']/gi,
-    /window\.location\.replace\s*\([^)]*\)\)/gi,
-    /window\.location\.replace\s*\([^)]*\)/gi,
-    /window\.location\.assign\s*\([^)]*\)/gi,
-  ];
+  if (target?.includes("jerusalemsandals.com")) {
+    // CRITICAL: Remove/neutralize JavaScript that changes location
+    const locationChangePatterns = [
+      /window\.location\s*=\s*["'][^"']*["']/gi,
+      /document\.location\s*=\s*["'][^"']*["']/gi,
+      /location\.href\s*=\s*["'][^"']*["']/gi,
+      /location\.replace\s*\([^)]*\)/gi,
+      /location\.assign\s*\([^)]*\)/gi,
+      /window\.location\.href\s*=\s*["'][^"']*["']/gi,
+      /window\.location\.replace\s*\([^)]*\)\)/gi,
+      /window\.location\.replace\s*\([^)]*\)/gi,
+      /window\.location\.assign\s*\([^)]*\)/gi,
+    ];
     locationChangePatterns.forEach((pattern, index) => {
       let matches = content.match(pattern);
       if (matches) {
@@ -657,7 +667,6 @@ async function rewriteUrls(
       }
     });
   }
-
 
   // SUPER AGGRESSIVE: Remove any script tags that mention the target domain
   const targetDomainScriptRegex = new RegExp(
@@ -688,13 +697,12 @@ async function rewriteUrls(
       "<head>",
       "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
     );
-  } 
-  else if (content.includes("<html")) {
+  } else if (content.includes("<html")) {
     content = content.replace(
       "<html",
       siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
     );
-  } 
+  }
   // else {
   //   // This is commented out because it was adding <script></script> tags to some js files
   //   // Fallback: prepend to the beginning
@@ -797,7 +805,7 @@ async function rewriteUrls(
 
         const separator = path.includes("?") ? "&" : "?";
         const rewrittenUrl = `//${proxyHost}${path}${separator}hmtarget=${domain}&hmtype=1`;
-        return `url("${rewrittenUrl}")`;
+        return `url('${rewrittenUrl}')`;
       } else if (url.match(/^https?:\/\//)) {
         try {
           const urlObj = new URL(url);
@@ -807,12 +815,11 @@ async function rewriteUrls(
             ? "&"
             : "?";
           const rewrittenUrl = `${protocol}://${proxyHost}${urlObj.pathname}${urlObj.search}${separator}hmtarget=${urlObj.host}&hmtype=1`;
-          return `url("${rewrittenUrl}")`;
+          return `url('${rewrittenUrl}')`;
         } catch (e) {
           return match;
         }
-      } 
-      else if (url.startsWith("/")) {
+      } else if (url.startsWith("/")) {
         const separator = url.includes("?") ? "&" : "?";
         const rewrittenUrl = `${protocol}://${proxyHost}${url}${separator}hmtarget=${target}&hmtype=1`;
         return `url('${rewrittenUrl}')`;
@@ -1153,10 +1160,8 @@ async function makeProxyRequest(targetUrl, options) {
 
 function movePayloadBeforeHmtarget(url) {
   const _url = url?.toLowerCase();
-  if(!_url.includes('hmtarget='))
-    return url;
-  else if(url.includes('hmtarget=') && url.endsWith('=1'))
-    return url;
+  if (!_url.includes("hmtarget=")) return url;
+  else if (url.includes("hmtarget=") && url.endsWith("=1")) return url;
 
   const match = url.match(/hmtype=1([^&]*)/);
   if (!match) return url; // nothing to do
@@ -1231,7 +1236,8 @@ async function handleRequest(req, res, next) {
     delete cleanQuery.hmurl;
 
     // Build the target URL
-    const queryString = new URLSearchParams(cleanQuery).toString();
+    let queryString = new URLSearchParams(cleanQuery).toString();
+
     const targetUrl = `https://${cleanTarget}${requestPath}${
       queryString ? "?" + queryString : ""
     }`;
@@ -1348,10 +1354,25 @@ async function handleRequest(req, res, next) {
 
     // Process response body
     const contentType = proxyRes.headers["content-type"] || "";
-    let shouldReplaceUrls = 
+    let shouldReplaceUrls =
       contentType.includes("text/html") || looksLikeHTML(proxyRes.body);
 
-    shouldReplaceUrls = !contentType.startsWith('image/') && !contentType.startsWith('video/');
+    const binaryContentTypes = [
+      "image/",
+      "video/",
+      "audio/",
+      "application/octet-stream",
+      "application/pdf",
+      "application/zip",
+      "font/",
+      "application/font",
+    ];
+
+    shouldReplaceUrls = !binaryContentTypes.some((type) =>
+      contentType.startsWith(type)
+    );
+
+    // shouldReplaceUrls = !contentType.startsWith('image/') && !contentType.startsWith('video/');
 
     if (shouldReplaceUrls) {
       console.log("Processing HTML content with URL rewriting");
