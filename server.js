@@ -1351,7 +1351,7 @@ async function handleRequest(req, res, next) {
     let shouldReplaceUrls = 
       contentType.includes("text/html") || looksLikeHTML(proxyRes.body);
 
-    shouldReplaceUrls = !contentType.startsWith('image/');
+    shouldReplaceUrls = !contentType.startsWith('image/') && !contentType.startsWith('video/');
 
     if (shouldReplaceUrls) {
       console.log("Processing HTML content with URL rewriting");
