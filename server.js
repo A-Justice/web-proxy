@@ -305,16 +305,18 @@ async function rewriteUrls(
 
   // Inject the script right after <head> or at the beginning of <body>
   // INJECT THE DOMAIN LOCK SCRIPT AT THE VERY BEGINNING
-  if (content.includes("<head>")) {
-    content = content.replace(
-      "<head>",
-      "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
-    );
-  } else if (content.includes("<html")) {
-    content = content.replace(
-      "<html",
-      siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
-    );
+  if (content.includes("<html")) {
+    if (content.includes("<head>")) {
+      content = content.replace(
+        "<head>",
+        "<head>" + siteSpecificScript + domainLockScript + proxyInterceptorScript
+      );
+    }else{
+      content = content.replace(
+        "<html",
+        siteSpecificScript + domainLockScript + proxyInterceptorScript + "<html"
+      );
+    }
   }
 
   // Remove problematic scripts
