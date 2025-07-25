@@ -28,7 +28,55 @@ app.use(express.json({ limit: "50mb" })); // For JSON payloads
 app.use(express.urlencoded({ extended: true, limit: "50mb" })); // For form data
 app.use(express.raw({ type: "*/*", limit: "50mb" })); // For other content types
 
-// Helper function to get common headers
+// Helper function to extract target domain from proxied URL
+function extractTargetFromProxiedUrl(proxiedUrl) {
+  try {
+    const url = new URL(proxiedUrl);
+    const params = new URLSearchParams(url.search);
+    return params.get('hmtarget');
+  } catch (e) {
+    return null;
+  }
+}
+
+// Helper function to rewrite referrer header back to original domain
+function rewriteReferrerHeader(referrerUrl, targetDomain, protocol = 'https') {
+  if (!referrerUrl) return null;
+  
+  try {
+    const refUrl = new URL(referrerUrl);
+    const urlParams = new URLSearchParams(refUrl.search);
+    const hmtarget = urlParams.get('hmtarget');
+    
+    // If this is a proxied referrer with hmtarget, convert it back
+    if (hmtarget) {
+      // Remove proxy parameters
+      urlParams.delete('hmtarget');
+      urlParams.delete('hmtype');
+      urlParams.delete('hmurl');
+      
+      // Build the original URL
+      const cleanQuery = urlParams.toString();
+      const originalUrl = `${protocol}://${hmtarget}${refUrl.pathname}${cleanQuery ? '?' + cleanQuery : ''}`;
+      
+      console.log('🔄 Referrer rewritten:', referrerUrl, '→', originalUrl);
+      return originalUrl;
+    }
+    
+    // If referrer is already from target domain, keep as is
+    if (refUrl.hostname === targetDomain) {
+      return referrerUrl;
+    }
+    
+    // For other cases, return null to let browser handle
+    return null;
+  } catch (e) {
+    console.error('Error rewriting referrer:', e);
+    return null;
+  }
+}
+
+// Helper function to get common headers with referrer rewriting
 function getCommonHeaders(target, originalHeaders = {}, hasBody = false) {
   const headers = {
     Host: target,
@@ -51,6 +99,32 @@ function getCommonHeaders(target, originalHeaders = {}, hasBody = false) {
     "X-Forwarded-For": originalHeaders["x-forwarded-for"] || "127.0.0.1",
     "X-Forwarded-Proto": "https",
   };
+
+  // ENHANCED: Handle referrer header rewriting
+  if (originalHeaders["referer"] || originalHeaders["referrer"]) {
+    const referrerHeader = originalHeaders["referer"] || originalHeaders["referrer"];
+    const rewrittenReferrer = rewriteReferrerHeader(referrerHeader, target);
+    
+    if (rewrittenReferrer) {
+      headers["Referer"] = rewrittenReferrer;
+      console.log('✅ Set rewritten referrer:', rewrittenReferrer);
+    } else {
+      // If we can't rewrite it properly, set a basic referrer from target domain
+      headers["Referer"] = `https://${target}/`;
+      console.log('✅ Set fallback referrer:', headers["Referer"]);
+    }
+  } else {
+    // If no referrer provided, set a default one for the target domain
+    headers["Referer"] = `https://${target}/`;
+    console.log('✅ Set default referrer:', headers["Referer"]);
+  }
+
+  // ENHANCED: Set proper origin header for AJAX/API requests
+  if (originalHeaders["x-requested-with"] === "XMLHttpRequest" || 
+      originalHeaders["content-type"]?.includes("application/json")) {
+    headers["Origin"] = `https://${target}`;
+    console.log('✅ Set origin for AJAX request:', headers["Origin"]);
+  }
 
   // Only preserve important headers when appropriate
   if (originalHeaders["cookie"]) {
@@ -885,6 +959,20 @@ function movePayloadBeforeHmtarget(url) {
   return updated;
 }
 
+// ENHANCED: Debug middleware to log referrer handling
+app.use(function(req, res, next) {
+  if (req.headers.referer || req.headers.referrer) {
+    console.log('🔍 REFERRER DEBUG:', {
+      method: req.method,
+      path: req.path,
+      originalReferrer: req.headers.referer || req.headers.referrer,
+      target: req.query.hmtarget,
+      userAgent: req.headers['user-agent']?.substring(0, 50) + '...'
+    });
+  }
+  next();
+});
+
 // FIXED: Enhanced main request handler with better error handling
 async function handleRequest(req, res, next) {
   try {
@@ -957,10 +1045,21 @@ async function handleRequest(req, res, next) {
 
     console.log("Final target URL:", targetUrl);
 
-    // Prepare headers and body
-    const hasBody =
-      ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && req.body;
+    // Log original referrer header before processing
+    console.log("Original referrer header:", req.headers["referer"] || req.headers["referrer"]);
+
+    // ENHANCED: Prepare headers with proper referrer rewriting
+    const hasBody = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && req.body;
     const headers = getCommonHeaders(cleanTarget, req.headers, hasBody);
+
+    // Additional referrer validation for specific request types
+    if (req.path.includes("/cart/") || req.path.includes("cart.js")) {
+      // For cart requests, ensure referrer is from the target domain
+      if (!headers["Referer"] || !headers["Referer"].includes(cleanTarget)) {
+        headers["Referer"] = `https://${cleanTarget}/`;
+        console.log('🛒 Set cart-specific referrer:', headers["Referer"]);
+      }
+    }
 
     // FIXED: Better body handling for cart requests
     let requestBody = null;
@@ -1339,6 +1438,27 @@ app.get("/favicon.ico", function(req, res) {
   res.status(204).end();
 });
 
+// ENHANCED: Add test endpoint to verify referrer rewriting
+app.get('/test-referrer', function(req, res) {
+  const testReferrer = req.query.referrer;
+  const testTarget = req.query.target || 'example.com';
+  
+  if (testReferrer) {
+    const rewritten = rewriteReferrerHeader(testReferrer, testTarget);
+    res.json({
+      original: testReferrer,
+      target: testTarget,
+      rewritten: rewritten,
+      explanation: 'This shows how referrer headers are rewritten by the proxy'
+    });
+  } else {
+    res.json({
+      error: 'Please provide ?referrer= and optionally ?target= parameters',
+      example: '/test-referrer?referrer=http://localhost:3000/collections/summer-essentials?hmtarget=spongelle.com&hmtype=1&target=spongelle.com'
+    });
+  }
+});
+
 // FIXED: Enhanced test POST endpoint
 app.post("/test-post", function(req, res) {
   console.log("=== TEST POST ENDPOINT ===");
@@ -1433,7 +1553,7 @@ setupWebSocketProxy(server);
 // Start server
 server.listen(PORT, function() {
   console.log("=================================");
-  console.log("🚀 ENHANCED Dual-Mode Proxy Server running on port " + PORT);
+  console.log("🚀 ENHANCED Dual-Mode Proxy Server with Referrer Rewriting running on port " + PORT);
   console.log("=================================");
   console.log("📋 AVAILABLE MODES:");
   console.log("🔧 hmtype=1: Complete original implementation (DEFAULT)");
@@ -1455,12 +1575,19 @@ server.listen(PORT, function() {
   console.log("⚙️ Service Worker interception");
   console.log("🌐 Enhanced CORS and relaxed CSP");
   console.log("=================================");
+  console.log("🆕 REFERRER REWRITING FEATURES:");
+  console.log("🔄 Automatic referrer header conversion");
+  console.log("🎯 Proxied URLs → Original domain URLs");
+  console.log("🔗 Enhanced origin header handling");
+  console.log("🧪 Test endpoint: /test-referrer");
+  console.log("=================================");
   console.log("Usage examples:");
   console.log("Original: http://localhost:" + PORT + "/?hmtarget=example.com&hmtype=1");
   console.log("Or simply: http://localhost:" + PORT + "/?hmtarget=example.com");
   console.log("SPA Mode: http://localhost:" + PORT + "/?hmtarget=spa-site.com&hmtype=2");
   console.log("Asset: http://localhost:" + PORT + "/asset?hmtarget=example.com&hmtype=1");
   console.log("WebSocket: ws://localhost:" + PORT + "/ws-proxy?hmtarget=spa-site.com&hmws=wss://spa-site.com/ws");
+  console.log("Test Referrer: http://localhost:" + PORT + "/test-referrer?referrer=http://localhost:3000/page?hmtarget=example.com");
   console.log("=================================");
 });
 
