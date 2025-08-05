@@ -39,6 +39,7 @@ function extractTargetFromProxiedUrl(proxiedUrl) {
   }
 }
 
+
 // Helper function to rewrite referrer header back to original domain
 function rewriteReferrerHeader(referrerUrl, targetDomain, protocol = 'https') {
   if (!referrerUrl) return null;
@@ -137,44 +138,6 @@ function getCommonHeaders(target, originalHeaders = {}, hasBody = false) {
   }
 
   return headers;
-}
-
-// DNS resolution with caching and failure tracking
-async function resolveDomain(domain) {
-  // Check cache first
-  const cached = dnsCache.get(domain);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.ip;
-  }
-
-  // Check failed domains
-  const failed = failedDomains.get(domain);
-  if (failed && failed.count > 3 && Date.now() - failed.time < 10000) {
-    throw new Error("Failed to resolve domain after " + failed.count + " attempts");
-  }
-
-  try {
-    const addresses = await dns.resolve4(domain);
-    if (addresses && addresses.length > 0) {
-      const ip = addresses[0];
-      dnsCache.set(domain, { ip: ip, timestamp: Date.now() });
-      // Clear any failure records
-      failedDomains.delete(domain);
-      return ip;
-    }
-    throw new Error("No A records found");
-  } catch (error) {
-    // Track failures
-    const currentFailed = failedDomains.get(domain) || {
-      count: 0,
-      time: Date.now(),
-    };
-    failedDomains.set(domain, {
-      count: currentFailed.count + 1,
-      time: Date.now(),
-    });
-    throw error;
-  }
 }
 
 // Function to check if content looks like HTML
@@ -292,6 +255,10 @@ async function rewriteUrls(
       siteSpecificScript = await getSiteSpecificScriptContent("carnivoresnacks.js");
   } else if (target && target.includes("byltbasics")) {
     siteSpecificScript = await getSiteSpecificScriptContent("byltbasics.js");
+  } else if (target && target.includes("peakdesign.com")) {
+    siteSpecificScript = await getSiteSpecificScriptContent("peakdesign.js");
+  }else if (target && target.includes("spongelle.com")){
+    siteSpecificScript = await getSiteSpecificScriptContent("shopify-sites.js");
   }
 
   const domainLockScript = "\n<script>\n(function() {\n    'use strict';\n    \n    // ENHANCED: Multiple-layer protection approach\n    console.log('🛡️ SUPER EARLY DOMAIN LOCK ACTIVATED');\n    console.log('🛡️ Current location:', window.location.href);\n    console.log('🛡️ Current host:', window.location.host);\n    console.log('🛡️ Current hostname:', window.location.hostname);\n    \n    const TARGET_DOMAIN = '" + target + "';\n    const PROXY_HOST = '" + proxyHost + "';\n    const PROXY_PROTOCOL = '" + protocol + ":';\n    \n    // STRATEGY 1: Override critical location methods immediately\n    const originalAssign = window.location.assign;\n    const originalReplace = window.location.replace;\n    \n    \n    // STRATEGY 3: Override document.domain\n    try {\n        Object.defineProperty(document, 'domain', {\n            get: function() { return PROXY_HOST.split(':')[0]; },\n            set: function(value) {\n                console.warn('🛡️ BLOCKED document.domain set to:', value);\n                return PROXY_HOST.split(':')[0];\n            },\n            configurable: false\n        });\n        console.log('✅ Successfully locked document.domain');\n    } catch (e) {\n        console.error('❌ Could not lock document.domain:', e);\n    }\n    \n    // STRATEGY 4: Aggressive monitoring and correction\n    let lastHref = window.location.href;\n    let monitoringActive = true;\n    \n    const locationMonitor = setInterval(function() {\n        if (!monitoringActive) return;\n        \n        const currentHref = window.location.href;\n        if (currentHref !== lastHref) {\n            console.warn('🛡️ DETECTED LOCATION CHANGE:', lastHref, '->', currentHref);\n            \n            // Check for domain hijacking pattern: target.com:3000\n            if (currentHref.includes(TARGET_DOMAIN + ':') && !currentHref.includes(PROXY_HOST)) {\n                console.error('🛡️ CRITICAL: Domain hijack detected! Pattern:', TARGET_DOMAIN + ':3000');\n                console.log('🛡️ Attempting immediate correction...');\n                \n                try {\n                    monitoringActive = false; // Prevent recursive corrections\n                    const correctedUrl = currentHref.replace?.(TARGET_DOMAIN + ':', PROXY_HOST.split(':')[0] + ':');\n                    console.log('🛡️ Correcting to:', correctedUrl);\n                    window.location.replace?.(correctedUrl);\n                } catch (e) {\n                    console.error('🛡️ Could not correct domain hijack:', e);\n                    monitoringActive = true; // Re-enable monitoring\n                }\n            } else if (currentHref.includes(TARGET_DOMAIN) && !currentHref.includes('hmtarget=')) {\n                console.error('🛡️ CRITICAL: Direct target domain access detected!');\n                console.log('🛡️ Attempting to add proxy parameters...');\n                \n                try {\n                    monitoringActive = false;\n                    const separator = currentHref.includes('?') ? '&' : '?';\n                    const correctedUrl = currentHref + separator + 'hmtarget=' + TARGET_DOMAIN + '&hmtype=1';\n                    console.log('🛡️ Correcting to:', correctedUrl);\n                    window.location.replace?.(correctedUrl);\n                } catch (e) {\n                    console.error('🛡️ Could not add proxy parameters:', e);\n                    monitoringActive = true;\n                }\n            }\n            \n            lastHref = currentHref;\n        }\n    }, 50); // Check every 50ms for faster detection\n    \n    // STRATEGY 5: Override common redirect methods\n    const originalSetTimeout = window.setTimeout;\n    window.setTimeout = function(callback, delay) {\n        if (typeof callback === 'string' && callback.includes('location') && callback.includes(TARGET_DOMAIN)) {\n            console.warn('🛡️ BLOCKED malicious setTimeout with location change:', callback);\n            return;\n        }\n        return originalSetTimeout.apply(this, arguments);\n    };\n    \n    const originalSetInterval = window.setInterval;\n    window.setInterval = function(callback, delay) {\n        if (typeof callback === 'string' && callback.includes('location') && callback.includes(TARGET_DOMAIN)) {\n            console.warn('🛡️ BLOCKED malicious setInterval with location change:', callback);\n            return;\n        }\n        return originalSetInterval.apply(this, arguments);\n    };\n    \n    console.log('🛡️ MULTI-LAYER DOMAIN PROTECTION COMPLETED');\n    console.log('🛡️ Active protections: location.assign, location.replace, href setter, domain lock, monitoring');\n})();\n</script>";
@@ -728,10 +695,9 @@ function rewriteUrlHelperSPA(url, target, proxyHost, protocol) {
 }
 
 // =================
-// SHARED HELPER FUNCTIONS (ALL YOUR ORIGINAL FUNCTIONS)
+// SHARED HELPER FUNCTIONS
 // =================
 
-// FIXED: Enhanced cart JSON URL rewriting
 function rewriteCartJsonUrls(body, target, proxyHost, protocol) {
   if (!body) return body;
 
@@ -772,7 +738,6 @@ function rewriteCartJsonUrls(body, target, proxyHost, protocol) {
   return content;
 }
 
-// FIXED: Enhanced request maker with better error handling and loop prevention
 async function makeProxyRequest(targetUrl, options) {
   let redirects = 0;
   let retries = 0;
@@ -959,7 +924,7 @@ function movePayloadBeforeHmtarget(url) {
   return updated;
 }
 
-// ENHANCED: Debug middleware to log referrer handling
+
 app.use(function(req, res, next) {
   if (req.headers.referer || req.headers.referrer) {
     console.log('🔍 REFERRER DEBUG:', {
@@ -973,7 +938,6 @@ app.use(function(req, res, next) {
   next();
 });
 
-// FIXED: Enhanced main request handler with better error handling
 async function handleRequest(req, res, next) {
   try {
     const sanitizedUrl = movePayloadBeforeHmtarget(req.url);
@@ -1043,11 +1007,6 @@ async function handleRequest(req, res, next) {
 
     const targetUrl = "https://" + cleanTarget + requestPath + (queryString ? "?" + queryString : "");
 
-    console.log("Final target URL:", targetUrl);
-
-    // Log original referrer header before processing
-    console.log("Original referrer header:", req.headers["referer"] || req.headers["referrer"]);
-
     // ENHANCED: Prepare headers with proper referrer rewriting
     const hasBody = ["POST", "PUT", "PATCH", "DELETE"].includes(req.method) && req.body;
     const headers = getCommonHeaders(cleanTarget, req.headers, hasBody);
@@ -1095,7 +1054,6 @@ async function handleRequest(req, res, next) {
       headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
       headers["Pragma"] = "no-cache";
       headers["X-Requested-With"] = "XMLHttpRequest";
-      console.log("Applied cart-specific headers");
     }
 
     // Make request to target
@@ -1106,14 +1064,6 @@ async function handleRequest(req, res, next) {
       headers: headers,
       body: requestBody,
     });
-
-    console.log("Proxy response received, status:", proxyRes.status);
-
-    // FIXED: Better error handling for cart responses
-    if (proxyRes.status >= 400 && req.path.includes("/cart/")) {
-      console.log("Cart request failed with status:", proxyRes.status);
-      console.log("Response body:", proxyRes.body.toString());
-    }
 
     // CRITICAL: Check for Location header and rewrite it
     if (proxyRes.headers["location"]) {
@@ -1180,7 +1130,7 @@ async function handleRequest(req, res, next) {
 
     // Process response body based on hmtype
     const contentType = proxyRes.headers["content-type"] || "";
-    let shouldReplaceUrls =
+    let isHtml =
       contentType.includes("text/html") || looksLikeHTML(proxyRes.body);
 
     const binaryContentTypes = [
@@ -1196,9 +1146,9 @@ async function handleRequest(req, res, next) {
       "text/plain; charset=utf-8"
     ];
 
-    shouldReplaceUrls = !binaryContentTypes.some(function(type) {
+    let shouldReplaceUrls = (!binaryContentTypes.some(function(type) {
       return contentType.startsWith(type);
-    });
+    })) && isHtml;
 
     if (shouldReplaceUrls) {
       const protocol = req.protocol || req.get("x-forwarded-proto") || "http";
@@ -1375,7 +1325,11 @@ function setupWebSocketProxy(server) {
   
   wss.on('connection', function connection(ws, req) {
     try {
-      const reqUrl = new URL(req.url, 'http://localhost');
+      const serverHost = req.headers.host || 'localhost:' + PORT;
+      const serverProtocol = req.headers['x-forwarded-proto'] || 'http';
+      const baseUrl = serverProtocol + '://' + serverHost;
+      
+      const reqUrl = new URL(req.url, baseUrl);
       const targetDomain = reqUrl.searchParams.get('hmtarget');
       const wsUrl = reqUrl.searchParams.get('hmws');
       
